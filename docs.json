@@ -1,53 +1,95 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "theme": "luma",
+  "name": "Raydium Transfer Hook Kit",
   "colors": {
     "primary": "#16A34A",
     "light": "#07C983",
     "dark": "#15803D"
   },
-  "favicon": "/favicon.svg",
   "navigation": {
     "pages": [
       {
-        "group": "Getting Started",
+        "group": "Introduction",
         "pages": [
           "index",
-          "quickstart"
+          "introduction/transfer-hooks-on-raydium",
+          "introduction/what-are-transfer-hooks",
+          "introduction/why-transfer-hook-tokens-matter-for-raydium-integrators",
+          "introduction/how-it-works",
+          "introduction/raydium-transfer-hook-kit"
+        ]
+      },
+      {
+        "group": "Getting Started",
+        "pages": [
+          "getting-started/prerequisites",
+          "getting-started/quickstart",
+          "getting-started/repo-layout",
+          "getting-started/devnet",
+          "getting-started/browser-demo"
+        ]
+      },
+      {
+        "group": "Build a Hook",
+        "pages": [
+          "build-a-hook/fork-the-starter",
+          "build-a-hook/write-your-rule",
+          "build-a-hook/configure-accounts",
+          "build-a-hook/test-your-hook",
+          "build-a-hook/deploy-your-hook"
+        ]
+      },
+      {
+        "group": "Examples",
+        "pages": [
+          "examples/fair-launch",
+          "examples/creator-commitment",
+          "examples/holder-rewards"
+        ]
+      },
+      {
+        "group": "Reference / Community",
+        "pages": [
+          "community/contributing",
+          "community/fork-the-repo"
         ]
       }
     ],
     "global": {
       "anchors": [
         {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
+          "anchor": "GitHub",
+          "icon": "github",
+          "href": "https://github.com/trilltino/raydium-transfer-hook"
         },
         {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
+          "anchor": "Raydium Docs",
+          "icon": "book-open",
+          "href": "https://docs.raydium.io/"
+        },
+        {
+          "anchor": "Solana Docs",
+          "icon": "book",
+          "href": "https://solana.com/docs"
         }
       ]
     }
   },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
   "navbar": {
     "links": [
       {
-        "label": "Support",
-        "href": "mailto:support@mintlify.com"
+        "href": "https://docs.raydium.io/",
+        "label": "Raydium Docs"
+      },
+      {
+        "href": "https://solana.com/docs",
+        "label": "Solana Docs"
       }
     ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/trilltino/raydium-transfer-hook"
     }
   },
   "contextual": {
@@ -64,9 +106,7 @@
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/trilltino/raydium-transfer-hook"
     }
   }
 }

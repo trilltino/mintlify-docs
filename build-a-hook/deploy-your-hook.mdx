@@ -1,0 +1,173 @@
+---
+title: "Deploy your transfer hook program and set it up on a mint"
+sidebarTitle: "Deploy Your Hook"
+description: "Build with cargo build-sbf, deploy with raydium-hook hook build/deploy/setup/inspect, create a hooked mint, and approve it for Raydium pool creation."
+---
+
+Deploying a hook has three parts. You build the program, deploy it to a cluster and set it up for a mint. The `raydium-hook` CLI runs each part, and you can also run each step by hand.
+
+## Build
+
+```sh
+raydium-hook hook build my-hook --out target/hook-build
+```
+
+This runs `cargo build-sbf` in `my-hook` and copies the `.so` file to `target/hook-build`. It prints the SHA-256 of the binary. It also prints the program ID from the keypair that `cargo build-sbf` created beside the artifact.
+
+## Deploy
+
+```sh
+raydium-hook hook deploy \
+  --env environments/devnet.json \
+  --keypair .keys/deployer.json \
+  --so target/hook-build/my_hook.so \
+  --name my-hook
+```
+
+The command runs three steps:
+
+1. Finds or creates a program keypair. It looks at `--program-keypair`, then under `--keys`, then beside the `.so` file.
+2. Deploys the program if it does not already exist.
+3. Records the deployment in the environment file with its SHA-256, lockfile hash and toolchain.
+
+To deploy by hand, use `solana program deploy`:
+
+```sh
+solana program deploy target/deploy/my_hook.so --url devnet \
+  --program-id <PROGRAM_KEYPAIR.json> --upgrade-authority <KEYPAIR.json>
+```
+
+## Create a hooked mint
+
+```sh
+raydium-hook mint create --hookable \
+  --env environments/devnet.json \
+  --keypair .keys/deployer.json
+```
+
+This creates a Token-2022 mint with the TransferHook extension. The mint does not point at your program yet.
+
+## Set up the hook
+
+```sh
+raydium-hook hook setup \
+  --env environments/devnet.json \
+  --keypair .keys/deployer.json \
+  --kind generic \
+  --setup my-hook/setup.json \
+  --mint <MINT_ADDRESS>
+```
+
+The generic provider reads `setup.json` and sends two instructions:
+
+1. The instruction that points the mint at your hook program.
+2. Your `InitializeHook` instruction from `setup.json`.
+
+Inspect the result:
+
+```sh
+raydium-hook hook inspect <MINT_ADDRESS> --env environments/devnet.json
+```
+
+## Approve the mint for pool creation
+
+Raydium's CPMM and CLMM admit a Token-2022 mint with a TransferHook extension to a new pool only if the program admin has approved that mint. This is Raydium's existing rule. It applies per mint, not per hook program.
+
+Check whether a mint is approved:
+
+```sh
+raydium-hook mint approval --env environments/devnet.json --mint <MINT_ADDRESS>
+```
+
+Approve one mint. Only the admin can sign this.
+
+```sh
+raydium-hook mint approve \
+  --env environments/devnet.json \
+  --keypair .keys/deployer.json \
+  --mint <MINT_ADDRESS>
+```
+
+Approve many mints from a file:
+
+```sh
+raydium-hook mint approve \
+  --env environments/devnet.json \
+  --keypair .keys/deployer.json \
+  --mints-file mints.txt
+```
+
+Use `--dry-run` to see what the command would do without sending. The command skips mints that are already approved, simulates every transaction before sending, and packs approvals into as few transactions as fit.
+
+The usual order is:
+
+1. Create the mint with `--hookable`.
+2. Approve it.
+3. Create the pool.
+4. Attach the hook with `hook setup`.
+
+## Environment files
+
+Each file under `environments/` describes a cluster:
+
+- `localnet.json` needs no keys and targets a local validator.
+- `devnet.json` describes the project's integration deployment on devnet.
+- `raydium-devnet.json` describes Raydium's official devnet programs, which do not contain the hook-aware instructions.
+
+For your own deployment, copy `environments/devnet.json` to `environments/mine.json`. Replace `programs`, `admin` and `cpmm_fee_receiver`, and empty `deployments` and `evidence`. Then run:
+
+```sh
+cargo xtask env deploy-devnet --env environments/mine.json
+```
+
+This builds the forks with the `integration` feature and builds every hook. It deploys what is missing, runs `e2e --record` for every hook through both AMMs, and regenerates the evidence page.
+
+## Deployment cost
+
+| Cost | Amount |
+| --- | --- |
+| Hook program rent | About 0.7 to 0.9 SOL per program (126 to 169 KB). The starter's devnet deployment cost about 0.94 SOL. |
+| Per-mint setup | About 0.005 SOL for fair-launch (validation list, config and slot counter). Each Holder Rewards record costs about 0.0014 SOL. |
+| Raydium programs, if you deploy the forks | About 9 SOL on devnet. CPMM costs about 3 SOL at 597 KB, and CLMM is about twice that size. |
+
+All program rent is a refundable deposit.
+
+## Your own devnet deployment
+
+The [Fork the repo](/community/fork-the-repo) page has the full steps. In short:
+
+1. Fork the two Raydium forks and set your own program ID, admin and fee receiver.
+2. Put your keys in `.keys/`, which git ignores.
+3. Point an environment file at your IDs.
+4. Run `cargo xtask env deploy-devnet --env environments/mine.json`.
+
+## Who holds authority
+
+Three separate authorities control a hooked mint.
+
+| Power | Where to read it |
+| --- | --- |
+| Replace the hook program's code | The `program.upgrade` field in `raydium-hook inspect` output |
+| Point the mint at a different hook | The mint's TransferHook extension authority, `hook_authority`, which reads `None` once revoked |
+| Change the hook's per-mint settings | The hook's own config authority. Each template's README names the holder. |
+
+Decide who holds the upgrade authority. That key can replace your rule for every token, so state the holder publicly or revoke it.
+
+## Next steps
+
+- Read the [Fair Launch example](/examples/fair-launch).
+- Read the trust model in [What are transfer hooks](/introduction/what-are-transfer-hooks).
+
+## Related documentation
+
+### Raydium
+
+- [Create a CPMM pool](https://docs.raydium.io/user-flows/create-cpmm-pool). Walks through creating a constant product pool.
+- [Create a CLMM pool](https://docs.raydium.io/user-flows/create-clmm-pool). Walks through creating a concentrated liquidity pool.
+
+### Solana
+
+- [Program deployment](https://solana.com/docs/core/programs/program-deployment). Explains how the loader stores and upgrades a program.
+- [Deploying programs](https://solana.com/docs/programs/deploying). Covers the deploy command and the upgrade authority.
+- [Verified builds](https://solana.com/docs/programs/verified-builds). Shows how to prove deployed bytecode matches public source.
+- [SPL Token CLI](https://solana.com/docs/references/spl-token-cli). Documents `spl-token` commands for creating Token-2022 mints.

@@ -1,0 +1,68 @@
+---
+title: "Run any Token-2022 Transfer Hook in Raydium CPMM and CLMM"
+sidebarTitle: "Overview"
+description: "Raydium Transfer Hooks lets any Token-2022 hook run inside Raydium CPMM and CLMM swaps with no allowlist, and tests that a refused swap rolls back."
+---
+
+Raydium Transfer Hooks runs any Token-2022 Transfer Hook inside Raydium CPMM and CLMM swaps. It needs no allowlist and no approval from Raydium or from this repository. You write the rule. The stack resolves the hook accounts for each transfer in the swap, builds the swap instruction, and checks that the hook ran. If the hook refuses, the stack checks that every balance rolled back.
+
+These docs cover the concepts, the starter hook, the three example hooks, and the tools you use to test a hook on a local validator and on devnet.
+
+<CardGroup cols={2}>
+  <Card title="What are transfer hooks" icon="link" href="/introduction/what-are-transfer-hooks">
+    The Token-2022 extension and the SPL contract the stack depends on.
+  </Card>
+  <Card title="Why Raydium" icon="water" href="/introduction/why-transfer-hook-tokens-matter-for-raydium-integrators">
+    Why a hooked mint needs hook-aware Raydium instructions.
+  </Card>
+  <Card title="How it works" icon="gears" href="/introduction/how-it-works">
+    How the SDK resolves and orders the accounts for each transfer.
+  </Card>
+  <Card title="Transfer hook kit" icon="toolbox" href="/introduction/raydium-transfer-hook-kit">
+    The starter, the example hooks, the CLI, and the clients.
+  </Card>
+</CardGroup>
+
+## Where Raydium fits
+
+Raydium is an external program, and this repository contains none of its source. The hook-aware changes live in forks of the Raydium CPMM and CLMM programs. The file `upstream.lock.toml` pins each fork to a commit, and the build fetches them into the git-ignored `target/upstream/` directory.
+
+<Warning>
+  Raydium's own programs on devnet and mainnet do not contain `swap_base_input_v2`, `swap_v3`, or the other hook-aware instructions. Nobody has opened an upstream pull request. Everything here runs on the forks under their own program IDs. Run `raydium-hook env probe` to check whether a deployment has the hook-aware instructions.
+</Warning>
+
+## Current status
+
+The project grades every claim by the strongest evidence behind it. From weakest to strongest, the levels are in-process, local validator, integration devnet, and official Raydium.
+
+- In-process means `solana-program-test` runs the real SBF binaries in the Agave runtime.
+- Local validator means a `solana-test-validator` process driven over RPC from a clean checkout with no private keys. CI runs this on every change.
+- Integration devnet means the project's own builds of the forks, deployed to devnet under the project's program IDs.
+- Official Raydium means Raydium's own deployment. Nothing has reached this level.
+
+| Capability | Status |
+| --- | --- |
+| Hooked swap through CPMM `swap_base_input_v2` and CLMM `swap_v3`, both directions | Integration devnet |
+| A hook refusal aborts the swap and leaves balances and pool state unchanged | Integration devnet |
+| Every example hook through both AMMs | Integration devnet and local validator |
+| An unrelated hook with no allowlist and no adapter changes | Integration devnet |
+| CPMM exact-output swap, deposit, withdraw, and fee collection with `_v2` instructions | Integration devnet |
+| CLMM positions, liquidity, fees, and limit orders | Integration devnet |
+| CLMM reward emissions in a hooked reward mint | In-process. Reward funding also ran on a local validator and devnet |
+| Creating a pool with a hooked mint | Needs the pool admin to approve the mint with `raydium-hook mint approve` |
+| Official Raydium, including its devnet | Not supported |
+| LaunchLab | Blocked, because its on-chain handler is not public |
+| Benchmarks for accounts, compute, and transaction size | Partial |
+
+## Related documentation
+
+### Raydium
+
+- [What is Raydium](https://docs.raydium.io/introduction/what-is-raydium). Describes the exchange and its pool programs.
+- [Products](https://docs.raydium.io/products). Lists CPMM, CLMM, LaunchLab and the other Raydium programs.
+- [Versions and migration](https://docs.raydium.io/protocol-overview/versions-and-migration). Explains how Raydium versions its programs and instructions.
+
+### Solana
+
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Defines the Token-2022 extension that this kit builds on.
+- [Token extensions](https://solana.com/docs/tokens/extensions). Lists every Token-2022 extension a mint can enable.

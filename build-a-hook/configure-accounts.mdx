@@ -1,0 +1,177 @@
+---
+title: "Configure extra accounts for your transfer hook"
+sidebarTitle: "Configure Accounts"
+description: "Declare extra accounts in the ExtraAccountMetaList validation list, write setup.json for the generic provider, and understand privilege and count limits."
+---
+
+A hook can request extra accounts beyond the six standard SPL `Execute` accounts. You declare them in the `ExtraAccountMetaList`, called the validation list. `InitializeHook` creates it together with the per-mint config. The SDK resolves the extra accounts for each transfer with the official SPL resolver.
+
+## The N+2 slice
+
+For a hook with `N` resolved extra accounts, each hooked transfer appends `N + 2` accounts:
+
+- The `N` extra accounts
+- The hook program
+- The validation list
+
+A Raydium swap has two transfers. If both legs are hooked, the swap appends `(N1 + 2) + (N2 + 2)` accounts. Each leg keeps its own slice, even if keys repeat.
+
+## The validation list in the starter
+
+The starter declares one extra account, the config PDA. This is the code in `src/pda.rs`:
+
+```rust
+pub fn config_extra_account_meta() -> Result<ExtraAccountMeta, ProgramError> {
+    ExtraAccountMeta::new_with_seeds(
+        &[
+            Seed::Literal {
+                bytes: CONFIG_SEED.to_vec(),
+            },
+            Seed::AccountKey { index: 1 },
+        ],
+        false,
+        false,
+    )
+}
+```
+
+The list lives at the canonical PDA `spl_transfer_hook_interface::get_extra_account_metas_address(mint, program_id)`.
+
+## setup.json format
+
+The generic provider reads `setup.json` to initialize your hook for a mint without linking your crate. This is the `setup.json` file from `templates/transfer-hook-starter`:
+
+```json
+{
+  "setup": [
+    {
+      "accounts": [
+        {
+          "pda": {
+            "program": "{program}",
+            "seeds": [
+              "utf8:hook-config",
+              "key:{hooked_mint}"
+            ]
+          },
+          "writable": true
+        },
+        {
+          "pda": {
+            "program": "{program}",
+            "seeds": [
+              "utf8:extra-account-metas",
+              "key:{hooked_mint}"
+            ]
+          },
+          "writable": true
+        },
+        {
+          "key": "{hooked_mint}"
+        },
+        {
+          "key": "{payer}",
+          "signer": true
+        },
+        {
+          "key": "{payer}",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "key": "{system_program}"
+        }
+      ],
+      "data_hex": "484b494e49543031000100000000000000000000006d61782d7472616e736665722d7631000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800f401000000000000"
+    }
+  ],
+  "refusals": [
+    {
+      "direction": "hooked_in",
+      "plan": {
+        "over_amount": {
+          "amount_in": 600
+        }
+      },
+      "code": 28683
+    },
+    {
+      "direction": "hooked_out",
+      "plan": {
+        "over_amount": {
+          "amount_in": 600
+        }
+      },
+      "code": 28683
+    }
+  ]
+}
+```
+
+### Placeholders
+
+The provider resolves `{program}`, `{payer}`, `{hooked_mint}` and `{system_program}` at setup time. A seed can be `utf8:<text>`, `hex:<bytes>` or `key:<address or placeholder>`.
+
+### Fields
+
+| Field | Meaning |
+| --- | --- |
+| `setup` | Instructions to send after pointing the mint at the hook. |
+| `accounts` | Accounts for each instruction, with `pda` or `key`, plus `signer` and `writable` flags. |
+| `data_hex` | Instruction data as hex, without `0x`. |
+| `refusals` | Swaps the hook must refuse, with direction (`hooked_in` or `hooked_out`), plan (`over_amount`, `repeat`, `priority_fee`) and exact error `code`. |
+| `allowed_writable` | Writable extras the integrator accepts. The SDK refuses any other writable extra. |
+| `state_account` | An account the hook writes on every allowed transfer. The flow checks that it changes. |
+
+## Privilege rules
+
+The SDK checks every transfer. It refuses a resolved extra that is writable or a signer unless the integrator names it.
+
+```rust
+let options = ResolveOptions::default()
+    .with_expected_hook_program(hook_program)
+    .with_privilege_policy(PrivilegePolicy::allowing_writable([counter_account]));
+```
+
+As a result:
+
+- Your hook cannot force an integrator to accept a writable extra.
+- The integrator opts in to exactly your accounts.
+- The SDK refuses signer extras by default.
+
+## Limits on extra account count
+
+Every extra account goes into every hooked transfer, and a Raydium swap carries two legs. The authors measured these limits with a hook that does nothing but declare N extras.
+
+| Limit | Figure |
+| --- | --- |
+| Practical ceiling | About 10 PDA-derived extras work today. |
+| Hook heap exhaustion | 12 to 14 extras (32 KiB heap). |
+| Token-2022 heap exhaustion | 16 extras and above. |
+
+`hook_kit::PRACTICAL_EXTRA_ACCOUNTS` records the figure `10`. The examples declare two or three.
+
+Nobody has measured literal-address extras. They cost less, but stay well under the ceiling. If you need many extras, versioned transactions with address lookup tables are an option, but the driver does not build them yet.
+
+## Writable extras and contention
+
+If every transfer writes one account, transfers of that mint in the same block serialize on it. State that cost in your README. The `fair-launch` and `holder-rewards` examples write one account on every transfer, so their mints serialize within a block.
+
+## Next steps
+
+- [Test your hook](/build-a-hook/test-your-hook)
+- [Deploy your hook](/build-a-hook/deploy-your-hook)
+
+## Related documentation
+
+### Raydium
+
+- [Account model](https://docs.raydium.io/solana-fundamentals/account-model). Explains Solana accounts as Raydium uses them.
+- [PDAs and CPIs](https://docs.raydium.io/solana-fundamentals/pdas-and-cpis). Explains program derived addresses and cross program calls.
+
+### Solana
+
+- [Accounts](https://solana.com/docs/core/accounts). Defines owners, rent and writable flags.
+- [Program derived addresses](https://solana.com/docs/core/pda). Explains addresses derived from seeds.
+- [PDA derivation](https://solana.com/docs/core/pda/pda-derivation). Shows how seeds and a bump produce an address.
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Shows the `extra-account-metas` validation account and its seeds.

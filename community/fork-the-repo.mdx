@@ -1,0 +1,153 @@
+---
+title: "Fork the Raydium transfer hook repo for your own deployment"
+sidebarTitle: "Fork the Repo"
+description: "Fork the Raydium Transfer Hook repository to deploy your own hook-aware Raydium CPMM and CLMM programs with custom program IDs, keys and evidence."
+---
+
+You can reuse most of this repository unchanged. To deploy to a public cluster, you need your own program IDs, keys and forked Raydium programs. This page lists what to keep, what to change and the steps for your own deployment. For the single-hook deploy steps, see [Deploy your hook](/build-a-hook/deploy-your-hook).
+
+## Three goals and the work each needs
+
+| Goal | You need | Time |
+| --- | --- | --- |
+| Write and test a hook | A Rust toolchain | Minutes, with `cargo test` |
+| Run your hook through real Raydium pools in-process | The two hook-aware Raydium binaries built with your keys | An afternoon |
+| Do the same on a real cluster and publish the evidence | All of the above, plus devnet SOL for rent | A day |
+
+## What you can reuse unchanged
+
+- The hook templates and examples under `templates/`
+- The shared plumbing in `crates/hook-kit`
+- The in-process test world and `cargo xtask localnet build`, which use the `localnet` feature, the upstream program IDs and a throwaway admin
+- The `raydium-hook` CLI, `cargo xtask env deploy-devnet` and the evidence generator
+
+## What a public cluster fork must change
+
+For devnet, the build uses the forks' `integration` feature instead of `localnet`. This feature compiles in a program ID, an admin key and a fee receiver key. The committed `environments/devnet.json` uses the maintainers' IDs. Git ignores the keys behind them, and the maintainers never publish them. A fork that deploys to a public cluster needs its own keys.
+
+### Step 1: Fork the two Raydium forks
+
+Fork [`trilltino/raydium-cp-swap`](https://github.com/trilltino/raydium-cp-swap) and [`trilltino/raydium-clmm`](https://github.com/trilltino/raydium-clmm), both on the `transfer-hook-support` branch. Set your own program ID, admin and fee receiver in each `integration` feature. Search the source for `feature = "integration"` to find them. Update `upstream.lock.toml` to your commits, then check it:
+
+```bash
+cargo xtask upstream verify
+```
+
+### Step 2: Create your keys in `.keys/`
+
+Run `solana-keygen new` for each file.
+
+| File | Used for |
+| --- | --- |
+| `deployer.json` | Pays fees and is the admin compiled into the Raydium builds |
+| `cpmm-program.json`, `clmm-program.json` | The two Raydium program IDs |
+| `cpmm-fee-receiver.json` | The CPMM pool creation fee receiver, a wrapped-SOL token account |
+| `hook-program.json`, `arbitrary-hook-program.json` | The reference hook and the arbitrary test hook |
+| `creator-commitment-program.json`, `fair-launch-program.json`, `holder-rewards-program.json` | The three examples |
+
+### Step 3: Point an environment at your IDs
+
+Copy `environments/devnet.json` to a new file such as `environments/mine.json`. Replace `programs`, `admin` and `cpmm_fee_receiver`, and empty `deployments` and `evidence`.
+
+### Step 4: Build, deploy, run and record
+
+One command does all of it:
+
+```bash
+cargo xtask env deploy-devnet --env environments/mine.json
+```
+
+The command runs these steps:
+
+1. Verifies the locks.
+2. Builds the forks with `integration` and every hook into `target/integration-sbf`.
+3. Deploys whatever is missing. `raydium-hook deploy` skips programs that already exist, so it never replaces a recorded ID.
+4. Records each deployment with its SHA-256, lockfile hash and toolchain.
+5. Runs `raydium-hook e2e --record` for every hook through both AMMs.
+6. Regenerates the evidence page.
+
+Use `--hook NAME` and `--amm cpmm|clmm` to narrow the run.
+
+To run the same steps by hand:
+
+```bash
+raydium-hook deploy --env environments/mine.json --keypair .keys/deployer.json --artifacts target/integration-sbf --keys .keys
+raydium-hook e2e --env environments/mine.json --keypair .keys/deployer.json --fee-receiver-keypair .keys/cpmm-fee-receiver.json --amm all --hook all --record
+cargo xtask devnet-doc --env environments/mine.json --out docs/devnet.md
+```
+
+Hooks with a time window wait in real time on a live cluster. The individual commands take `--vest-seconds`, `--window-seconds` and `--reward-seconds` to set those waits.
+
+### Step 5: Run the in-process flows against your binaries
+
+This step is optional.
+
+```bash
+RTH_PROFILE=integration cargo test -p program-test-flows -- --ignored
+```
+
+## Approve a hooked mint
+
+Raydium's CPMM and CLMM admit a Token-2022 mint with a TransferHook extension to a new pool only if the program admin has approved that mint through `create_support_mint_associated`. This is Raydium's existing rule, and this repository did not add it. It applies per mint, not per hook program. The program accepts two signers for the approval, its compile-time `admin` or one fixed owner key. Whoever deploys the forks with their own keys approves the mints. Nobody else can.
+
+On a local validator you do nothing. The end-to-end flows approve their mints with the throwaway admin in `tests/fixtures/localnet`.
+
+On a cluster where you hold the admin key, run these commands:
+
+```bash
+# Check if a mint is approved (read-only, no key)
+raydium-hook mint approval --env environments/mine.json --mint MINT
+
+# Approve one mint, several, or a file with one address per line
+raydium-hook mint approve --env environments/mine.json --keypair .keys/deployer.json --mint MINT
+raydium-hook mint approve --env environments/mine.json --keypair .keys/deployer.json --mints-file mints.txt
+
+# See what it would do without sending anything
+raydium-hook mint approve ... --dry-run
+```
+
+`mint approve` refuses a key that is not the admin the environment records, and it prints the key the program expects. It checks that each mint is a Token-2022 mint with a TransferHook extension. If the mint names a hook program, it checks that the program exists and is executable. It skips mints that are already approved, simulates every transaction before sending, and packs approvals into as few transactions as fit. It reports a mint it cannot approve and continues with the others. The command exits with an error if any approval failed. `--amm cpmm|clmm|all` picks the programs, and the default is `all`.
+
+The usual order is:
+
+1. Create the mint with the extension using `mint create --hookable`.
+2. Approve it.
+3. Create the pool.
+4. Attach the hook with `hook setup`.
+
+### TypeScript alternative
+
+[`scripts/approve-hooked-mints.ts`](https://github.com/trilltino/raydium-transfer-hook/blob/main/scripts/README.md) does the same job in TypeScript. It needs Node 22 and `@solana/web3.js`, and it does not use the Raydium SDK.
+
+```bash
+npm run approve -- --env ... --keypair ... --mint MINT
+```
+
+### Run a shared cluster for a hackathon
+
+Teams can run everything locally with no keys. To let them try hooks on a public cluster instead, follow these steps:
+
+1. Deploy the forks under your own keys with steps 1 to 4 above. Both programs together need about 9 SOL of rent on devnet. The CPMM program account held 3.03 SOL at 597 KB, and CLMM is about twice that size.
+2. Each team creates its mint with `mint create --hookable` and sends you the address.
+3. You approve the batch. Put the addresses in a file and run `mint approve --mints-file`. Check one with `mint approval`.
+4. Each team checks its own mint with `mint approval`, which needs no key, then creates the pool and attaches its hook.
+
+Only you can do step 3, because only the admin key can sign the approval. To remove the gate, change the forks to admit `TransferHook` in `is_supported_mint`. That change is yours to make, and Raydium upstream is unlikely to accept it.
+
+## What you must not change
+
+- The pinned dependency versions: `solana-program 2.2.1`, `solana-program-test 2.2.7`, `solana-sdk 2.2.2`, `spl-token 7.0.0`, `spl-token-2022 7.0.0`, `spl-transfer-hook-interface 0.10.0` and `spl-tlv-account-resolution 0.10.0`. The pins are exact on purpose. See [source-lock.md](https://github.com/trilltino/raydium-transfer-hook/blob/main/docs/source-lock.md).
+- Per-leg resolution. The two transfers of a swap get separate slices that the SDK never merges, deduplicates or reorders.
+- The rule against Raydium source in the repository. `cargo xtask upstream verify` fails if tracked paths look like copied Raydium source.
+
+## Related documentation
+
+### Raydium
+
+- [Versions and migration](https://docs.raydium.io/protocol-overview/versions-and-migration). Explains how Raydium versions its programs.
+- [Rust CPI](https://docs.raydium.io/sdk-api/rust-cpi). Shows how a Rust program calls Raydium.
+
+### Solana
+
+- [Installation dependencies](https://solana.com/docs/intro/installation/dependencies). Lists the toolchain versions a build needs.
+- [Rust programs](https://solana.com/docs/programs/rust). Explains native Rust programs and their crates.

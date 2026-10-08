@@ -1,0 +1,161 @@
+---
+title: "Test your transfer hook against real Token-2022 and Raydium pools"
+sidebarTitle: "Test Your Hook"
+description: "Run unit tests, in-process tests with the hook-kit test world, and end-to-end flows on a local validator with real CPMM and CLMM pools."
+---
+
+You test a hook at three levels. Unit tests cover the rule. In-process tests run against the real Token-2022 program. End-to-end tests run through real Raydium pools on a local validator. Each level asserts exact error codes and checks that a refusal rolls every balance back.
+
+## Unit tests for the rule
+
+Test `src/rule.rs` directly. Cover one under the boundary, at the boundary and one over it. Cover rounding and overflow extremes. The starter's tests are in `tests/hook_program.rs` and `tests/token_2022_transfer.rs`.
+
+Run the native tests with no keys and no network:
+
+```sh
+cargo test --manifest-path my-hook/Cargo.toml
+```
+
+To run against the real SBF build:
+
+```sh
+cargo build-sbf --manifest-path my-hook/Cargo.toml --sbf-out-dir target/deploy
+SBF_OUT_DIR=$PWD/target/deploy cargo test --manifest-path my-hook/Cargo.toml
+```
+
+When `SBF_OUT_DIR` is set, `ProgramTest` runs the real SBF binary instead of the native processor. Only SBF mode gives a meaningful compute figure.
+
+## In-process tests with hook-kit
+
+`crates/hook-kit` provides `testing::World`. It creates a hooked Token-2022 mint and funded accounts in-process. Its transfers resolve hook accounts through the SDK the same way an integrator does.
+
+The starter's `tests/token_2022_transfer.rs` uses it to prove four things:
+
+- The hook refuses a direct `Execute` call that did not come from Token-2022, with `NotDirectInvocation`.
+- A transfer within the limit succeeds.
+- The hook refuses a transfer above the limit with `TransferExceedsLimit`.
+- After a refusal, source and destination balances are unchanged.
+
+This is the core of the test:
+
+```rust
+let transfer = |amount| {
+    let mut instruction = token_instruction::transfer_checked(
+        &token_program,
+        &source_account.pubkey(),
+        &mint.pubkey(),
+        &destination_account.pubkey(),
+        &context.payer.pubkey(),
+        &[],
+        amount,
+        0,
+    )
+    .unwrap();
+    instruction.accounts.extend([
+        AccountMeta::new_readonly(config, false),
+        AccountMeta::new_readonly(HOOK_PROGRAM_ID, false),
+        AccountMeta::new_readonly(validation_list, false),
+    ]);
+    instruction
+};
+
+// succeeds: amount 40 <= limit 50
+context.banks_client.process_transaction(
+    Transaction::new_signed_with_payer(&[transfer(40)], ...)
+).await.unwrap();
+
+// refused: amount 60 > limit 50
+assert_custom_error(
+    context.banks_client.process_transaction(
+        Transaction::new_signed_with_payer(&[transfer(60)], ...)
+    ).await,
+    HookError::TransferExceedsLimit,
+);
+
+// balances unchanged after refusal
+let source_after = ...;
+let destination_after = ...;
+assert_eq!(source_state.base.amount, 60);
+assert_eq!(destination_state.base.amount, 40);
+```
+
+## End-to-end tests on a local validator
+
+Run your hook through real Raydium CPMM and CLMM pools on `solana-test-validator`.
+
+<Steps>
+  <Step title="Build the pinned forks and your hook">
+    ```sh
+    cargo xtask localnet build
+    ```
+  </Step>
+  <Step title="Start the validator">
+    ```sh
+    cargo xtask localnet validator
+    ```
+
+    Leave it running and open another terminal.
+  </Step>
+  <Step title="Run the end-to-end flow">
+    ```sh
+    cargo run -p raydium-hook-cli -- e2e \
+      --env environments/localnet.json \
+      --keypair tests/fixtures/localnet/admin.json \
+      --keys target/localnet/keys \
+      --amm all \
+      --hook-dir my-hook
+    ```
+  </Step>
+</Steps>
+
+The flow runs these steps:
+
+1. Builds and deploys your hook.
+2. Creates a hooked Token-2022 mint.
+3. Sets your hook up from `setup.json`.
+4. Creates real CPMM and CLMM pools.
+5. Swaps in both directions.
+6. Makes your hook refuse.
+7. Checks that every balance rolled back.
+8. Prints a PASS/FAIL table.
+
+## The PASS/FAIL table
+
+The `e2e` command builds the table from what happened on chain. Each row is a flow such as swap in, swap out, refusal or state change. PASS means the hook ran, the refusal rolled back, or the state changed as expected. FAIL means an assertion failed and the balances or pool state did not match.
+
+## Refusal rollback checks
+
+Every refusal test asserts four things:
+
+- The transaction returns the hook's exact error code.
+- The source and destination token balances are unchanged.
+- The pool state is unchanged.
+- The hook's state accounts, such as counters and records, are unchanged.
+
+The in-process tests in `tests/program-test` and the local validator `e2e` flow both run these checks. Right before signing, the SDK's `verify_unchanged` checks the hook again to detect a program upgrade or a validation list change.
+
+## Run every hook at once
+
+To run every hook in the repository through both AMMs on a local validator:
+
+```sh
+cargo xtask localnet e2e
+```
+
+This command builds, starts the validator, runs every flow and stops the validator.
+
+## Next steps
+
+- [Deploy your hook](/build-a-hook/deploy-your-hook)
+
+## Related documentation
+
+### Raydium
+
+- [Toolchain](https://docs.raydium.io/solana-fundamentals/toolchain). Lists the tools Raydium uses to build and test programs.
+
+### Solana
+
+- [Testing with Mollusk](https://solana.com/docs/programs/testing/mollusk). Shows another way to test a program in process.
+- [Compute budget](https://solana.com/docs/core/fees/compute-budget). Explains the compute limits your tests measure.
+- [Clusters and RPC endpoints](https://solana.com/docs/references/clusters). Lists the local validator endpoint.

@@ -1,0 +1,65 @@
+---
+title: "Why transfer hook tokens matter for Raydium integrators"
+sidebarTitle: "Why Raydium"
+description: "Why a Token-2022 Transfer Hook lets a token enforce its own rules in Raydium pools, what the hook-aware CPMM and CLMM forks add, and who pays for it."
+---
+
+A Transfer Hook puts a token's rules on the mint itself, so a website or an off-chain agreement no longer has to enforce them. Token-2022 runs the rule on every transfer, including the transfers inside a Raydium swap. This page explains what that lets a Raydium integrator build and why Raydium needs changes to support it.
+
+## What integrators can build
+
+A launchpad, issuer, protocol, or trading app can use a hook to enforce rules like these.
+
+- Limit early buys, account balances, or buys per slot during a launch.
+- Pay holders a reward based on both balance and how long they held it.
+- Stop a creator's dedicated account from falling below a public vesting schedule.
+- Allow transfers only to accounts that meet an eligibility rule.
+
+The repository includes three example hooks that show the first three.
+
+| Example | Who wants it | What it does | What it does not do |
+| --- | --- | --- | --- |
+| Fair Launch | A launch team or a community | Caps what one buy, one account, and one slot can take. With only the per-slot budget on, it limits bundled buys | Stop one person from using many accounts, stop buys spread across slots, or see a tip paid to a block builder |
+| Creator Commitment | A project that wants a creator's allocation to vest in public | The dedicated account cannot fall below the unvested amount, and moving tokens to another wallet does not get around it | Prove the creator holds no other tokens, or stop a burn |
+| Holder Rewards | A project paying holders, or spinning a child token off a parent | Tracks balance multiplied by time held and settles inside the transfer. A one-time mode funds the allocation once | Pay holders who never register, create the child token, or collect fees by itself |
+
+The rule stays with the Token-2022 mint, so it applies in every app that supports the hook, not just one frontend.
+
+## Why Raydium needs changes
+
+A Raydium swap contains two token transfers, one into the pool and one out. For a hooked mint, Token-2022 calls the hook on each transfer, and the hook may need extra accounts such as a config, a counter, or a holder record. Raydium has to receive those accounts and forward them to the correct Token-2022 transfer. The original Raydium instructions do not forward them, so they reject hooked mints.
+
+This project adds hook-aware instructions to forks of the Raydium programs. The original instructions stay unchanged for ordinary tokens.
+
+| AMM | Hook-aware instructions |
+| --- | --- |
+| CPMM | `swap_base_input_v2`, plus `_v2` versions of the exact-output swap, pool creation, deposit, withdraw, permissioned pool creation, and protocol, fund, and creator fee collection |
+| CLMM | `swap_v3`, plus `open_position_v3`, `increase_liquidity_v3`, `decrease_liquidity_v3`, limit order, reward, and fee collection instructions |
+
+Any hook can run through these instructions. Raydium does not have to approve it, and the SDK and instruction builders need no changes for a new hook.
+
+## Who pays
+
+| Cost | Who pays | Amount |
+| --- | --- | --- |
+| Deploying the hook program | Whoever deploys it | Refundable rent of about 5.1 SOL per MB. The example programs are 126 to 169 KB, about 0.7 to 0.9 SOL each |
+| Per-mint setup | The mint's hook authority | Rent for the validation list and config. About 0.005 SOL per mint for Fair Launch, by the rent formula |
+| Compute for each hooked transfer | The trader, as part of the swap | About 60,000 to 65,000 compute units for a CPMM swap with one hooked leg and no extra accounts |
+| Approving a hooked mint for pool creation | Whoever runs the Raydium deployment | A transaction fee and the rent for the approval record |
+
+<Warning>
+  Raydium CPMM and CLMM accept a Token-2022 mint with a TransferHook extension into a new pool only after the program admin approves that mint. This is Raydium's existing rule, and the approval is per mint, not per hook program. Whoever deploys the hook-aware forks holds the admin key and runs `raydium-hook mint approve`.
+</Warning>
+
+## Related documentation
+
+### Raydium
+
+- [Choosing a pool type](https://docs.raydium.io/user-flows/choosing-a-pool-type). Compares CPMM and CLMM pools.
+- [Token-2022 transfer fees](https://docs.raydium.io/algorithms/token-2022-transfer-fees). Shows how Raydium math handles a second Token-2022 extension.
+- [Attack vectors](https://docs.raydium.io/security/attack-vectors). Covers how a Token-2022 hook can be abused against a pool.
+
+### Solana
+
+- [Transfer hook integration](https://solana.com/docs/tokens/extensions/transfer-hook-integration). Shows how a program that moves hooked tokens passes the extra accounts.
+- [Compute budget](https://solana.com/docs/core/fees/compute-budget). Explains compute unit limits and how a transaction requests more.

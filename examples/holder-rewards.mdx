@@ -1,0 +1,333 @@
+---
+title: "Holder Rewards hook that pays holders by balance and time"
+sidebarTitle: "Holder Rewards"
+description: "Pay registered holders a reward token in proportion to balance multiplied by time held, in ongoing or one-time mode, through Raydium CPMM and CLMM swaps."
+---
+
+The Holder Rewards hook pays registered holders a reward token in proportion to balance multiplied by time held. A holder who keeps tokens for a month earns more than one who buys the day before a payout. This page covers the two modes, the instructions, the accounts and error codes, the limits, and how to run it. The CLI runs the ongoing mode as `holder-rewards` and the one-time mode as `holder-rewards-one-time`.
+
+## Two modes
+
+| Mode | Funding | Use |
+| --- | --- | --- |
+| Ongoing | Anyone can top it up, and each funding extends the stream | A loyalty program paid from fees or a treasury |
+| One-time | The hook accepts one funding and refuses a second with `AlreadyFunded` (`0xC00E`) | A parent token spinning a child token off to its holders, with a fixed amount over a fixed window |
+
+Both modes handle a transfer the same way.
+
+- What a holder earned before selling stays theirs to claim, whoever holds the tokens afterwards.
+- From the moment of the transfer, the buyer earns on the new balance if the buyer is registered.
+- Only registered token accounts earn. The pool's vault can never register.
+
+For a spin-off, the child token must already exist and must have no Transfer Hook of its own. The hook refuses a child with a hook, because claims would need extra accounts this program does not forward. This program does not create the child token.
+
+## How it works
+
+A funding pays `amount` evenly over `duration` seconds. Each second's share goes to the registered token accounts in proportion to their balance.
+
+The hook keeps one running number, the index, which is the reward earned so far per unit of balance. The index grows each second by `rate / eligible_supply`. Each holder record stores the index at its last settlement, so a holder's earnings are `balance x (index - index_paid)`. A transfer settles only the two accounts it touches, with no loop over holders. That keeps the cost per transfer constant and low enough to run inside a swap.
+
+```rust
+holder.on_balance_change(&mut stream, balance_before, balance_after)?;
+```
+
+## How the rule sits inside the hook
+
+The crate splits into two layers. `rule.rs` holds the reward math as pure Rust in two structs, `Stream` and `Holder`, so `cargo test` checks it without a validator. `processor/execute.rs` is the hook. It reads the accounts Token-2022 passes in, works out each side's balance before and after the transfer, calls the rule, and writes the updated records and global account back.
+
+### The rule's state
+
+`Stream` lives in the global PDA, one per mint. `Holder` lives in each holder record, one per registered token account.
+
+```rust templates/holder-rewards/src/rule.rs
+pub struct Stream {
+    /// Reward tokens paid out per second while the period lasts.
+    pub rate: u64,
+    pub period_finish: i64,
+    /// The last time the index was brought up to date.
+    pub last_update: i64,
+    /// Reward earned so far per unit of balance, scaled by PRECISION.
+    pub index: u128,
+    /// The sum of the balances of all registered accounts.
+    pub eligible_supply: u64,
+}
+
+pub struct Holder {
+    /// The balance this record last counted in the eligible supply.
+    pub checkpoint: u64,
+    /// The index value this holder was last settled at.
+    pub index_paid: u128,
+    /// Earned and settled, not yet claimed.
+    pub earned: u64,
+}
+```
+
+`PRECISION` is `1_000_000_000_000`. The index is stored at that scale so a small per-second share does not round to zero.
+
+### The rule's three steps
+
+`Stream::advance` brings the index up to the current time. It stops at `period_finish`, and it skips the update while `eligible_supply` is zero.
+
+```rust templates/holder-rewards/src/rule.rs
+pub fn advance(&mut self, now: i64) -> Result<(), HolderRewardsError> {
+    let until = now.min(self.period_finish);
+    if until > self.last_update && self.eligible_supply > 0 {
+        let seconds = (until - self.last_update) as u128;
+        let growth = (self.rate as u128)
+            .checked_mul(seconds)
+            .and_then(|v| v.checked_mul(PRECISION))
+            .ok_or(HolderRewardsError::MathOverflow)?
+            / self.eligible_supply as u128;
+        self.index = self
+            .index
+            .checked_add(growth)
+            .ok_or(HolderRewardsError::MathOverflow)?;
+    }
+    self.last_update = self.last_update.max(now);
+    Ok(())
+}
+```
+
+`Holder::settle` pays the holder for the index growth since their last settlement. It uses the smaller of the recorded balance and the actual balance, so burned tokens stop earning.
+
+```rust templates/holder-rewards/src/rule.rs
+pub fn settle(&mut self, stream: &Stream, balance_before: u64) -> Result<(), HolderRewardsError> {
+    let earning = self.checkpoint.min(balance_before) as u128;
+    let accrued = earning
+        .checked_mul(stream.index - self.index_paid)
+        .ok_or(HolderRewardsError::MathOverflow)?
+        / PRECISION;
+    self.earned = u64::try_from(accrued)
+        .ok()
+        .and_then(|a| self.earned.checked_add(a))
+        .ok_or(HolderRewardsError::MathOverflow)?;
+    self.index_paid = stream.index;
+    Ok(())
+}
+```
+
+`Holder::on_balance_change` settles at the old balance, then swaps the old balance for the new one in `eligible_supply`.
+
+```rust templates/holder-rewards/src/rule.rs
+pub fn on_balance_change(
+    &mut self,
+    stream: &mut Stream,
+    before: u64,
+    after: u64,
+) -> Result<(), HolderRewardsError> {
+    self.settle(stream, before)?;
+    stream.set_eligible(self.checkpoint, after)?;
+    self.checkpoint = after;
+    Ok(())
+}
+```
+
+### From a swap to the rule
+
+When a Raydium CPMM or CLMM swap moves the hooked token, Token-2022 moves the tokens first. It then calls the hook program with the SPL `Execute` instruction. `process_instruction` matches the 8-byte `EXECUTE_DISCRIMINATOR` from `hook_kit` and sends the call to `execute::process`, which runs these steps.
+
+<Steps>
+  <Step title="Run the shared checks in hook-kit">
+    `execute_prelude` runs the checks every hook in the repo shares. The hook passes `EXTRA_ACCOUNTS = 3`, so the call must carry exactly 8 accounts.
+
+    - It parses the transfer amount from the instruction data.
+    - It reads the mint's Transfer Hook extension and requires that it names this program.
+    - It reads the source and destination token accounts and requires both to belong to the mint.
+    - It requires the `transferring` flag on both token accounts. Token-2022 sets that flag only during a transfer, so a direct call to the hook fails.
+    - It checks the validation list address, owner and size, then checks each extra account against the list.
+
+    ```rust templates/holder-rewards/src/processor/execute.rs
+    const EXTRA_ACCOUNTS: usize = 3;
+    
+    let ctx = execute_prelude(program_id, accounts, data, EXTRA_ACCOUNTS)?;
+    let [global_account, source_record, destination_record] = ctx.extras else {
+        return Err(HolderRewardsError::InvalidGlobal.into());
+    };
+    ```
+  </Step>
+  <Step title="Leave early when nothing changes">
+    A transfer from an account to itself changes no balance, so the hook returns `Ok`. The hook then tests each record. A record counts as registered when this program owns it and its address is the `["holder", token_account]` PDA. An unregistered account passes an address with no data, and that test fails. When neither side is registered, the hook returns `Ok` without loading the global account.
+
+    ```rust templates/holder-rewards/src/processor/execute.rs
+    if ctx.source.key == ctx.destination.key {
+        return Ok(());
+    }
+    
+    let registered = |account: &AccountInfo, token_account: &Pubkey| -> bool {
+        account.owner == program_id && account.key == &record_address(token_account, program_id).0
+    };
+    let source_registered = registered(source_record, ctx.source.key);
+    let destination_registered = registered(destination_record, ctx.destination.key);
+    if !source_registered && !destination_registered {
+        return Ok(());
+    }
+    ```
+  </Step>
+  <Step title="Advance the stream">
+    The processor loads the `Stream` from the global PDA and calls `advance` with the cluster time. The index now includes every second up to this transfer, at the eligible supply that held before it.
+
+    ```rust templates/holder-rewards/src/processor/execute.rs
+    let mut global = load_global(program_id, ctx.mint.key, global_account)?;
+    global.stream.advance(now()?)?;
+    ```
+  </Step>
+  <Step title="Rebuild each side's balance before the transfer">
+    Token-2022 has already moved the tokens, so both token accounts show the balance after the transfer. The processor recovers the earlier balance from the amount. The source had `after + amount`. The destination had `after - amount`. For each registered side it calls `on_balance_change` and writes the record back.
+
+    ```rust templates/holder-rewards/src/processor/execute.rs
+    let amount = ctx.amount;
+    if source_registered {
+        let mut record = load_record(program_id, ctx.source.key, source_record)?;
+        let after = ctx.source_view.amount;
+        let before = after
+            .checked_add(amount)
+            .ok_or(HolderRewardsError::MathOverflow)?;
+        record
+            .holder
+            .on_balance_change(&mut global.stream, before, after)?;
+        write_record(&record, source_record)?;
+    }
+    if destination_registered {
+        let mut record = load_record(program_id, ctx.destination.key, destination_record)?;
+        let after = ctx.destination_view.amount;
+        let before = after
+            .checked_sub(amount)
+            .ok_or(HolderRewardsError::MathOverflow)?;
+        record
+            .holder
+            .on_balance_change(&mut global.stream, before, after)?;
+        write_record(&record, destination_record)?;
+    }
+    ```
+  </Step>
+  <Step title="Write the global account">
+    The processor writes the `Stream` back with its new index, `last_update` and `eligible_supply`. Unlike the Fair Launch and Creator Commitment hooks, this hook never refuses a transfer for a rule reason. It fails only on a wrong account or an arithmetic overflow.
+
+    ```rust templates/holder-rewards/src/processor/execute.rs
+    global.encode_into(&mut global_account.try_borrow_mut_data()?)?;
+    Ok(())
+    ```
+  </Step>
+</Steps>
+
+### A worked example
+
+This example follows the unit test `a_transfer_settles_both_sides_and_moves_the_eligible_supply` in `templates/holder-rewards/src/rule.rs`.
+
+A stream pays 1,000 reward tokens over 100 seconds, so `rate` is 10 per second. Two registered accounts, A and B, hold 100 tokens each, so `eligible_supply` is 200.
+
+At 50 seconds, A sends 60 tokens to B. The hook advances the index by `10 x 50 / 200 = 2.5` reward tokens per unit of balance, scaled by `PRECISION`. It settles A and B at their earlier balances of 100, so each one's `earned` becomes 250. It sets A's checkpoint to 40 and B's checkpoint to 160. Both accounts are registered, so `eligible_supply` stays 200.
+
+The remaining 500 tokens pay out over the last 50 seconds in the ratio 40 to 160. A earns 100 more and B earns 400 more. At the end, A claims 350 and B claims 650.
+
+If the buyer has no record, the hook skips that side and removes the sold tokens from `eligible_supply`. The registered holders then split the stream among fewer tokens.
+
+## Instructions
+
+| Instruction | Caller | What it does |
+| --- | --- | --- |
+| `Initialize` | The mint's hook authority | Picks the mode and creates the global account, the reward vault, and the validation list. The mint must have no mint authority, and the reward mint must have no hook |
+| `Register` | Anyone, who pays the record's rent | Adds a token account to the stream. The hook refuses the pool vault |
+| `Fund` | Anyone | Pays reward tokens into the vault and starts or extends the stream. The unpaid part of the current period rolls into the new one. In one-time mode, the hook accepts only the first funding |
+| `Claim` | The token account's owner | Pays the account's earnings to a token account of the reward mint |
+
+The reward vault is a token account at a PDA, and the global PDA owns it. Only this program can move rewards out of it. The reward token can be any plain mint of Token-2022 or the classic SPL Token program.
+
+## Accounts
+
+Each transfer needs three extra accounts, all writable, so a swap leg carries 5 accounts.
+
+| Account | Seeds |
+| --- | --- |
+| Global PDA | `["rewards", mint]` |
+| Source holder record | `["holder", token_account]` |
+| Destination holder record | `["holder", token_account]` |
+| Hook program | None |
+| Validation list | `["extra-account-metas", mint]` |
+
+The SDK refuses a leg with writable extra accounts unless the integrator names them. Pass the records to `PrivilegePolicy::allowing_writable`.
+
+A holder record is 73 bytes, so its rent is about 0.0014 to 0.0015 SOL. The global account is 186 bytes. Whoever calls `Register` pays the record's rent once.
+
+## Error codes
+
+| Code | Name | When |
+| --- | --- | --- |
+| `0xC001` | `InvalidInstruction` | The instruction is malformed |
+| `0xC002` | `InvalidGlobal` | The global account is wrong or malformed |
+| `0xC003` | `InvalidRecord` | The holder record is wrong or malformed |
+| `0xC004` | `ExcludedAccount` | The pool vault tried to register |
+| `0xC005` | `NotRegistered` | The account claimed with no record |
+| `0xC006` | `ZeroAmount` | The funding is zero or less than one unit per second |
+| `0xC007` | `InvalidDuration` | The duration is zero or longer than about ten years |
+| `0xC008` | `MathOverflow` | A fixed-point calculation overflowed |
+| `0xC009` | `RewardMintHasHook` | The reward mint has a hook of its own |
+| `0xC00A` | `RewardAccountMismatch` | The vault, mint, token program, or payout account is wrong |
+| `0xC00B` | `WrongOwner` | The signer does not own the token account |
+| `0xC00C` | `NothingToClaim` | The account has no earnings yet |
+| `0xC00D` | `PoolVaultMismatch` | The pool vault belongs to another mint |
+| `0xC00E` | `AlreadyFunded` | A one-time allocation already has its funding |
+
+## Limits
+
+- An account earns nothing until someone calls `Register` and pays the rent. A wallet UI can add `Register` to a buyer's first transaction. The hook does not create records inside the swap, because that would add a funded rent vault and the system program to every transfer.
+- The hook refuses only the configured pool vault. A second pool's vault, or any program-owned account, can register and collect rewards meant for holders.
+- A hook never runs on a burn. Burned tokens dilute other holders until the burner's next transfer or claim corrects the eligible supply. The mint authority must be revoked for the same reason, since minting is also invisible to the hook.
+- While no account is registered, that time's rewards stay in the vault.
+- Every transfer where either side is registered writes the global account, so those transfers run one after another.
+- Rounding goes down. The vault never owes more than its funding, and a few units can stay in it.
+- The rule assumes a fixed supply, with balances changing only through transfers.
+- The program's upgrade authority can replace this rule. Disclose the authority or revoke it.
+
+## CPMM and CLMM
+
+Holder Rewards runs on both Raydium pool types with the same program. Nothing in `rule.rs` or `processor/execute.rs` checks which Raydium program sent the transfer. The hook settles the sender and the receiver on every transfer, so a swap through a CPMM pool and a swap through a CLMM pool update rewards the same way. Neither pool's vault can register, so neither pool earns rewards.
+
+| Pool type | Swap instruction | Test in `tests/program-test/tests/local_flows.rs` |
+| --- | --- | --- |
+| CPMM | `swap_base_input_v2` | `cpmm_with_the_holder_rewards_template`, `cpmm_with_the_holder_rewards_one_time_mode` |
+| CLMM | `swap_v3` | `clmm_with_the_holder_rewards_template`, `clmm_with_the_holder_rewards_one_time_mode` |
+
+## Run it
+
+Build and test the hook.
+
+```bash
+cargo test -p holder-rewards-hook
+cargo build-sbf --manifest-path templates/holder-rewards/Cargo.toml --sbf-out-dir target/integration-sbf
+SBF_OUT_DIR=target/integration-sbf cargo test -p holder-rewards-hook
+```
+
+Run it through real Raydium pools on a local validator.
+
+```bash
+# Ongoing mode
+cargo run -p raydium-hook-cli -- e2e --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json --keys target/localnet/keys \
+  --amm all --hook holder-rewards
+
+# One-time spin-off mode
+cargo run -p raydium-hook-cli -- e2e --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json --keys target/localnet/keys \
+  --amm all --hook holder-rewards-one-time
+```
+
+The run checks that swaps settle the registered holder. It then funds the stream, lets time pass, claims, and confirms the reward reached the holder's quote token account. In one-time mode, it also tries a second funding and requires the hook to refuse it with `0xC00E`.
+
+The in-process flows `cpmm_with_the_holder_rewards_template` and `clmm_with_the_holder_rewards_template`, and their `one_time_mode` versions in `tests/program-test/tests/local_flows.rs`, run the same checks.
+
+Source: [`templates/holder-rewards`](https://github.com/trilltino/raydium-transfer-hook/tree/main/templates/holder-rewards)
+
+## Related documentation
+
+### Raydium
+
+- [CPMM accounts](https://docs.raydium.io/products/cpmm/accounts). Lists the pool vaults. The hook does not let these vaults register as holders.
+- [CLMM accounts](https://docs.raydium.io/products/clmm/accounts). Lists the CLMM pool accounts and vaults.
+- [How creator fees work](https://docs.raydium.io/user-flows/how-creator-fees-work). Describes Raydium's own way of paying fees to a token creator.
+
+### Solana
+
+- [Program derived addresses](https://solana.com/docs/core/pda). Explains the PDAs that store each holder's state.
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Explains how the hook sees each transfer.
+- [Transfer tokens](https://solana.com/docs/tokens/basics/transfer-tokens). Shows the transfer that pays out a claim.

@@ -1,0 +1,113 @@
+---
+title: "Write your transfer hook rule in Rust"
+sidebarTitle: "Write Your Rule"
+description: "Implement the rule.rs contract with pure Rust, no Solana types, exact inputs, a ProgramResult return, and unit tests for every boundary."
+---
+
+The rule lives in `src/rule.rs`. It is pure Rust with no account reads, no Solana types and no runtime dependencies. You can test and read it without knowing Solana internals.
+
+## The contract
+
+Your rule exports two functions:
+
+```rust
+pub fn validate_params(params: &[u8]) -> Result<(), HookError>
+pub fn check_transfer(config: &HookConfig, amount: u64) -> ProgramResult
+```
+
+| Function | When it runs | Job |
+| --- | --- | --- |
+| `validate_params` | At init and update | Reject parameters your rule cannot work with. |
+| `check_transfer` | On every transfer of the hooked mint | Return `Ok(())` to allow, or an error to refuse. A refusal aborts the whole transaction and rolls every balance back. |
+
+## The starter's default rule
+
+The starter ships with a maximum transfer size rule. This is the `src/rule.rs` file from `templates/transfer-hook-starter`:
+
+```rust
+use crate::{
+    HookConfig, HookError, MAX_TRANSFER_PARAMS_LEN, MAX_TRANSFER_TEMPLATE_VERSION,
+    TEMPLATE_MAX_TRANSFER_V1,
+};
+use solana_program::entrypoint::ProgramResult;
+
+pub fn validate_params(params: &[u8]) -> Result<(), HookError> {
+    let bytes: [u8; MAX_TRANSFER_PARAMS_LEN] =
+        params.try_into().map_err(|_| HookError::InvalidParams)?;
+    if u64::from_le_bytes(bytes) == 0 {
+        return Err(HookError::InvalidParams);
+    }
+    Ok(())
+}
+
+pub fn check_transfer(config: &HookConfig, amount: u64) -> ProgramResult {
+    if config.template_id != TEMPLATE_MAX_TRANSFER_V1 {
+        return Err(HookError::UnknownTemplate.into());
+    }
+    if config.template_version != MAX_TRANSFER_TEMPLATE_VERSION {
+        return Err(HookError::UnsupportedVersion.into());
+    }
+    // Inclusive: amount == limit passes.
+    if amount > config.max_transfer_limit()? {
+        return Err(HookError::TransferExceedsLimit.into());
+    }
+    Ok(())
+}
+```
+
+The default `params` value is one little-endian `u64` limit. The hook refuses any transfer above that limit. A transfer equal to the limit passes.
+
+## Requirements for every rule
+
+[The authoring guide](https://github.com/trilltino/raydium-transfer-hook/blob/main/docs/authoring-hooks.md) lists five requirements.
+
+1. Implement the SPL `Execute` instruction and reject any call that did not come from a Token-2022 transfer. The starter's `execute_prelude` checks the `transferring` flag on both token accounts.
+2. Return typed errors in your own code range. The starter uses `0x7001` upward. Fair Launch uses `0xB001`, Holder Rewards uses `0xC001` and Creator Commitment uses `0xA001`.
+3. Keep the rule bounded. Do not loop over holders, do not take an unbounded number of accounts, and return deterministic errors.
+4. Do not try to move the transferred tokens. Token-2022 gives a hook no authority over them. A hook can move other tokens that its own PDA controls, but never inside the transfer it is checking.
+5. State what your rule does not stop. Burns are not transfers. A priority-fee check sees the fee that a legacy or v0 transaction declares. It does not see a tip to a block builder, and it does not work on v1 transactions.
+
+## Two facts every rule relies on
+
+The authors checked both against the Token-2022 source.
+
+- Token-2022 updates balances before the hook runs, so the hook sees the balance after the transfer.
+- Token-2022 builds `Execute` read-only with a non-signer owner. A hook cannot spend the sender's authority. It can sign for its own PDAs.
+
+## Add state to your rule
+
+If your rule changes state, such as a counter or a timestamp, mark that account writable in the validation list. The SDK refuses writable resolved extras unless the integrator names them, so the integrator opts in to exactly your accounts.
+
+To read more than the amount, such as the sender, the receiver or a clock, add the account to the validation list in `config_extra_account_meta` and read it in `process_execute`. Every extra account adds to the size of each hooked transfer. See [Configure accounts](/build-a-hook/configure-accounts).
+
+## Unit tests
+
+Test `rule.rs` directly. Cover one under the boundary, at the boundary and one over it. Cover rounding and overflow extremes. The starter's tests are in `tests/hook_program.rs` and `tests/token_2022_transfer.rs`.
+
+```sh
+cargo test --manifest-path my-hook/Cargo.toml
+```
+
+To run against the real SBF build:
+
+```sh
+cargo build-sbf --manifest-path my-hook/Cargo.toml --sbf-out-dir target/deploy
+SBF_OUT_DIR=$PWD/target/deploy cargo test --manifest-path my-hook/Cargo.toml
+```
+
+## Next steps
+
+- [Configure accounts](/build-a-hook/configure-accounts)
+- [Test your hook](/build-a-hook/test-your-hook)
+
+## Related documentation
+
+### Raydium
+
+- [Attack vectors](https://docs.raydium.io/security/attack-vectors). Lists ways a hook rule can harm a pool, which your rule must avoid.
+
+### Solana
+
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Shows the `Execute` instruction and the `transferring` flag check.
+- [Instructions](https://solana.com/docs/core/instructions). Explains instruction data and account lists.
+- [Program structure](https://solana.com/docs/programs/rust/program-structure). Shows how a Rust program dispatches on instruction data.

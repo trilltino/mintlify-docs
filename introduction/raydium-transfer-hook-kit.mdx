@@ -1,0 +1,68 @@
+---
+title: "Raydium transfer hook kit with starter, examples, and CLI"
+sidebarTitle: "Transfer Hook Kit"
+description: "Tour the Raydium transfer hook kit repository, with its starter hook, three example hooks, the raydium-hook CLI, Rust and TypeScript clients, and a reference UI."
+---
+
+The [Raydium transfer hook kit](https://github.com/trilltino/raydium-transfer-hook) is the repository these docs describe. It has a starter hook to copy, three example hooks, the `raydium-hook` CLI, a Rust SDK, a TypeScript client, and a Fair Launch reference UI. In every hook, your custom logic goes in one file, `src/rule.rs`. That file is plain Rust with no accounts and no Solana types, and you unit-test it on its own.
+
+## Hooks
+
+| Folder | Rule |
+| --- | --- |
+| `templates/transfer-hook-starter` | The starter to copy. Its default rule caps the size of each transfer, and it already handles per-mint config, authority modes, and versioning |
+| `templates/creator-commitment` | The creator's dedicated account cannot fall below what a cliff-and-linear vesting schedule still locks |
+| `templates/fair-launch` | During a launch window, the hook limits buys from up to four pool vaults by buy size, account balance, buys per slot, and declared priority fee. You can switch off each limit |
+| `templates/holder-rewards` | Holders earn a quote-token reward in proportion to balance multiplied by time held. The pool never earns |
+
+The shared code every hook needs lives in `crates/hook-kit`. Using the starter is optional. `programs/arbitrary-test-hook` shares no code with it and still runs through both AMMs.
+
+## Tools
+
+| Path | What it does |
+| --- | --- |
+| `crates/raydium-hook-cli` | The `raydium-hook` CLI. Builds, deploys, and sets up hooks, creates and approves mints, runs end-to-end tests, and sends swaps |
+| `crates/transfer-hook-sdk` | Resolves the hook accounts for each transfer, returns structured errors, and builds hook-aware Raydium instructions |
+| `crates/raydium-adapters` | Instruction builders for the Raydium programs |
+| `crates/raydium-hook-driver` | Hook setup and the end-to-end test flows, over RPC or in-process |
+| `packages/transfer-hook-client` | The TypeScript client. It resolves each transfer, builds `swap_base_input_v2` and `swap_v3`, and decodes failures. Tests check its output byte for byte against the Rust SDK |
+| `apps/fair-launch-ui` | A React and Vite reference app that swaps a Fair Launch token and simulates each swap before the wallet signs |
+| `environments/` | Program IDs for `localnet.json`, `devnet.json`, and `raydium-devnet.json` |
+
+## Build your own hook
+
+You need Rust and the [Solana CLI](https://docs.anza.xyz/cli/install) with Agave 4.0. You need no keys and no network access beyond fetching the pinned forks.
+
+```sh
+# 1. Copy the starter or one of the examples
+cp -r templates/transfer-hook-starter my-hook
+
+# 2. Write your rule in my-hook/src/rule.rs, and update my-hook/setup.json if you change its parameters
+
+# 3. Test it against the real Token-2022 program
+cargo test --manifest-path my-hook/Cargo.toml
+
+# 4. Run it through real Raydium CPMM and CLMM pools on a local validator
+cargo xtask localnet build
+cargo xtask localnet validator   # leave running, then in another terminal:
+cargo run -p raydium-hook-cli -- e2e --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json --keys target/localnet/keys \
+  --amm all --hook-dir my-hook
+```
+
+Step 4 builds and deploys your hook, creates a hooked Token-2022 mint, and sets up the hook from `setup.json`. It then creates real CPMM and CLMM pools, swaps in both directions, makes your hook refuse a transfer, and checks that every balance rolled back. It prints a PASS or FAIL table based on what happened on chain.
+
+To run every hook in the repository in one command, use `cargo xtask localnet e2e`.
+
+## Related documentation
+
+### Raydium
+
+- [Quick start](https://docs.raydium.io/quick-start). Lists Raydium's own first steps for pools and swaps.
+- [Deploy a CPMM pool](https://docs.raydium.io/quick-start/deploy-cpmm-pool). Walks through creating a constant product pool.
+- [Deploy a CLMM pool](https://docs.raydium.io/quick-start/deploy-clmm-pool). Walks through creating a concentrated liquidity pool.
+
+### Solana
+
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Defines the extension the kit tests.
+- [Quick start](https://solana.com/docs/intro/quick-start). Introduces accounts, transactions and programs on Solana.

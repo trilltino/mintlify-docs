@@ -1,0 +1,56 @@
+---
+title: "What Token-2022 Transfer Hooks are and how they run"
+sidebarTitle: "What Are Transfer Hooks"
+description: "Learn how the Token-2022 Transfer Hook extension calls a hook program on every transfer, the SPL Execute contract, and what a hook can and cannot do."
+---
+
+A Transfer Hook is a Token-2022 mint extension. It names a program that Token-2022 calls on every transfer of that mint. The hook program can allow the transfer or refuse it, so a token creator can enforce a rule such as a vesting schedule or a per-buy limit on the token itself.
+
+## The SPL contract
+
+This project depends on the SPL transfer hook interface at a reviewed revision. At that revision, the contract has three parts.
+
+- The validation list is the PDA `["extra-account-metas", mint]` under the hook program. It holds an `ExtraAccountMetaList` for `Execute`, which lists the extra accounts the hook needs.
+- `Execute` is the discriminator `[105, 37, 101, 197, 75, 251, 102, 26]` followed by the amount as a little-endian `u64`.
+- The accounts for `Execute` are source, mint, destination, and authority, then the validation list, then the extra accounts resolved from that list.
+
+## What happens on a transfer
+
+<Steps>
+  <Step title="Token-2022 moves the tokens">
+    Token-2022 moves the tokens and marks the source and destination accounts as mid-transfer.
+  </Step>
+  <Step title="Token-2022 calls the hook">
+    Token-2022 calls the hook program's `Execute` instruction with the accounts above.
+  </Step>
+  <Step title="The transfer completes or fails">
+    If the hook succeeds, Token-2022 clears the mid-transfer flags. If the hook returns an error, the transfer fails and Solana rolls back the whole instruction that contained it.
+  </Step>
+</Steps>
+
+<Note>
+  Token-2022 looks for the hook program and the validation list among the accounts the caller passed in. A program that performs the transfer, such as a Raydium pool, has to forward those accounts to its own Token-2022 transfer call.
+</Note>
+
+## What a hook cannot do
+
+- A hook never runs for a burn, a mint, or an owner change. Only transfers call it.
+- A hook cannot spend the transfer authority. Token-2022 passes every account to the hook as read-only.
+- A permissionless hook is not automatically trustworthy. The stack proves that the hook ran and that a refusal rolled the swap back. It does not prove that the rule is good.
+
+## Trust model
+
+Treat a hook as an untrusted program that can refuse any transfer. The SDK checks that the mint points at the expected program, that the hook program owns the validation list and the list parses, and that the resolved accounts carry no unexpected signer or writable flags. The SDK cannot judge a hook's economics, who can change its settings, or whether its program is upgradeable.
+
+## Related documentation
+
+### Raydium
+
+- [SPL Token and Token-2022](https://docs.raydium.io/solana-fundamentals/spl-token-and-token-2022). Compares the two token programs that Raydium pools accept.
+- [Oracle and token risks](https://docs.raydium.io/security/oracle-and-token-risks). Lists the risks Raydium assigns to Token-2022 extensions, including transfer hooks.
+
+### Solana
+
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Shows how a mint names a hook program and how the validation account is derived.
+- [Token extensions](https://solana.com/docs/tokens/extensions). Lists the Token-2022 extensions.
+- [Cross program invocation](https://solana.com/docs/core/cpi). Explains the CPI that Token-2022 uses to call the hook.

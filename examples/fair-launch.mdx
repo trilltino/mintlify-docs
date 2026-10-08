@@ -1,0 +1,336 @@
+---
+title: "Fair Launch hook that caps buys per trade, account, and slot"
+sidebarTitle: "Fair Launch"
+description: "Limit buys during a launch window by buy size, account balance, buys per slot, and declared priority fee, on Raydium CPMM and CLMM pools with no allowlist."
+---
+
+The Fair Launch hook limits buys during a launch window. You set up to four limits on buy size, token account balance, buys per slot, and declared priority fee. This page covers the rule, its accounts and error codes, its limits, and how to run it. The CLI runs the full setting as `fair-launch` and the per-slot-only setting as `fair-launch-per-slot`.
+
+## The rule
+
+A buy is a transfer out of one of the launch's pool vaults. The hook calls these vaults venues, and a launch can have up to four. Outside the window, and for every transfer that is not a buy, the hook does nothing.
+
+| Check | What it limits | Error |
+| --- | --- | --- |
+| `max_buy` | The size of one buy | `0xB003` |
+| `max_wallet` | The balance one token account can reach | `0xB004` |
+| `max_buys_per_slot` | The number of buys in one slot, which limits bundles | `0xB005` |
+| `max_priority_micro_lamports` | The priority fee a transaction declares | `0xB006` |
+
+A limit of `0` switches that check off. At least one check must stay on. The same program gives three settings.
+
+| Setting | Limits on | Use |
+| --- | --- | --- |
+| Fair launch | All four | A full launch window with every limit |
+| Anti-bundle | Only `max_buys_per_slot`, with the window `0..i64::MAX` | Refuse a bundle of many buys in one block |
+| Anti-snipe | `max_buy` and `max_wallet`, with a short window | Stop one account from taking the pool in the first minutes |
+
+Token-2022 moves the tokens before it calls the hook. The buyer's balance the rule sees is therefore the balance after the buy.
+
+```rust templates/fair-launch/src/rule.rs
+pub fn check_buy(params: &Params, buy: &Buy) -> Result<(), FairLaunchError> {
+    if params.max_buy > 0 && buy.amount > params.max_buy {
+        return Err(FairLaunchError::PerBuyCapExceeded);
+    }
+    if params.max_wallet > 0 && buy.wallet_balance_after > params.max_wallet {
+        return Err(FairLaunchError::MaxWalletExceeded);
+    }
+    if params.max_buys_per_slot > 0 && buy.buys_in_slot > params.max_buys_per_slot {
+        return Err(FairLaunchError::TooManyBuysInSlot);
+    }
+    if params.max_priority_micro_lamports > 0
+        && buy.priority_micro_lamports.unwrap_or(0) > params.max_priority_micro_lamports
+    {
+        return Err(FairLaunchError::PriorityFeeTooHigh);
+    }
+    Ok(())
+}
+```
+
+## How the rule sits inside the hook
+
+The crate splits into two layers. `rule.rs` holds the decision as pure Rust with no accounts and no Solana types, so `cargo test` checks it in milliseconds. `processor/execute.rs` is the hook. It reads the accounts Token-2022 passes in, turns them into the plain values the rule needs, calls the rule, and writes state only when the rule allows the buy.
+
+### The rule's inputs
+
+The rule takes two structs. `Params` is the launch configuration, stored in the config PDA. `Buy` holds the facts about one transfer, and the processor builds it fresh on every call.
+
+```rust templates/fair-launch/src/rule.rs
+pub struct Params {
+    pub window_start: i64,
+    /// The rule stops applying at this time.
+    pub window_end: i64,
+    /// `0` switches the per-buy cap off.
+    pub max_buy: u64,
+    /// `0` switches the per-account cap off.
+    pub max_wallet: u64,
+    /// `0` switches the per-slot budget off.
+    pub max_buys_per_slot: u32,
+    /// `0` switches the priority-fee check off.
+    pub max_priority_micro_lamports: u64,
+}
+
+pub struct Buy {
+    pub amount: u64,
+    /// The buyer's balance after the buy.
+    pub wallet_balance_after: u64,
+    /// Buys in this slot including this one.
+    pub buys_in_slot: u32,
+    /// The transaction's declared priority fee, if it declares one.
+    pub priority_micro_lamports: Option<u64>,
+}
+```
+
+`rule.rs` also holds three helpers the processor calls before `check_buy`.
+
+```rust templates/fair-launch/src/rule.rs
+/// Whether a transfer out of `source` is a buy: `source` is one of the launch's venues.
+pub fn is_buy<K: PartialEq>(source: &K, venues: &[K]) -> bool {
+    venues.contains(source)
+}
+
+/// The buy count for `slot` once one more buy lands, given the last recorded `(slot, count)`.
+pub fn buys_in_slot_after(last_slot: u64, last_count: u32, slot: u64) -> u32 {
+    if slot == last_slot {
+        last_count.saturating_add(1)
+    } else {
+        1
+    }
+}
+
+/// The price of a ComputeBudget `SetComputeUnitPrice` instruction (tag 3, then a `u64`).
+pub fn priority_price(data: &[u8]) -> Option<u64> {
+    match data.split_first() {
+        Some((3, rest)) if rest.len() == 8 => Some(u64::from_le_bytes(rest.try_into().ok()?)),
+        _ => None,
+    }
+}
+```
+
+### From a swap to the rule
+
+When a Raydium CPMM or CLMM swap moves the hooked token, Token-2022 moves the tokens first. It then calls the hook program with the SPL `Execute` instruction. The hook runs these steps in order.
+
+<Steps>
+  <Step title="Dispatch on the Execute discriminator">
+    `process_instruction` compares the first 8 bytes of the instruction data with `EXECUTE_DISCRIMINATOR` from `hook_kit`. A match sends the call to `execute::process`. Any other data is decoded as the program's own `Initialize` instruction.
+
+    ```rust templates/fair-launch/src/processor/mod.rs
+    pub fn process_instruction(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        data: &[u8],
+    ) -> ProgramResult {
+        if data.len() >= 8 && data[..8] == EXECUTE_DISCRIMINATOR {
+            return execute::process(program_id, accounts, data);
+        }
+        match FairLaunchInstruction::unpack(data)? {
+            FairLaunchInstruction::Initialize(params) => {
+                initialize::process(program_id, accounts, params)
+            }
+        }
+    }
+    ```
+  </Step>
+  <Step title="Run the shared checks in hook-kit">
+    `execute_prelude` runs the checks every hook in the repo shares, then returns an `ExecuteCtx` with the amount, the five fixed accounts, the extra accounts and decoded views of both token accounts.
+
+    - It parses the transfer amount from the instruction data.
+    - It requires exactly 5 fixed accounts plus the number of extras the caller names.
+    - It reads the mint's Transfer Hook extension and requires that it names this program.
+    - It reads the source and destination token accounts and requires both to belong to the mint.
+    - It requires the `transferring` flag on both token accounts. Token-2022 sets that flag only during a transfer, so a direct call to the hook fails.
+    - It checks the validation list address, owner and size, then checks each extra account against the list.
+
+    The Fair Launch hook passes 2 or 3 as the extra count, because the instructions sysvar is present only when the fee check is on.
+
+    ```rust templates/fair-launch/src/processor/execute.rs
+    let extras = accounts.len().saturating_sub(FIXED_ACCOUNTS);
+    let ctx = execute_prelude(program_id, accounts, data, extras)?;
+    let (config_account, counter_account, instructions_sysvar) = match ctx.extras {
+        [config, counter] => (config, counter, None),
+        [config, counter, sysvar] => (config, counter, Some(sysvar)),
+        _ => return Err(FairLaunchError::InvalidConfig.into()),
+    };
+    ```
+  </Step>
+  <Step title="Load the config and leave early when no check applies">
+    The processor requires that this program owns the config account and that its address is the `["config", mint]` PDA. It decodes `Params` and the venues from it. Outside the window, or when the source is not a venue, the transfer is not a buy and the hook returns `Ok` without touching the counter. Sells and wallet-to-wallet transfers end here.
+
+    ```rust templates/fair-launch/src/processor/execute.rs
+    if config_account.owner != program_id
+        || config_account.key != &config_address(ctx.mint.key, program_id).0
+    {
+        return Err(FairLaunchError::InvalidConfig.into());
+    }
+    let config = Config::decode(&config_account.try_borrow_data()?)?;
+    
+    let clock = Clock::get()?;
+    if !config.params.in_window(clock.unix_timestamp) || !is_buy(ctx.source.key, config.venues()) {
+        return Ok(());
+    }
+    ```
+  </Step>
+  <Step title="Compute the new slot count">
+    The processor checks that the counter account is the `["counter", mint]` PDA, that this program owns it and that it is writable. It decodes the last recorded slot and count. `buys_in_slot_after` adds one when the slot is the same and restarts at 1 in a new slot. The processor holds the result in memory and does not write it yet.
+
+    ```rust templates/fair-launch/src/processor/execute.rs
+    let counter = Counter::decode(&counter_account.try_borrow_data()?)?;
+    let updated = Counter {
+        slot: clock.slot,
+        buys: buys_in_slot_after(counter.slot, counter.buys, clock.slot),
+        ..counter
+    };
+    ```
+  </Step>
+  <Step title="Read the declared priority fee">
+    When `max_priority_micro_lamports` is above zero, the processor walks the transaction's top-level instructions through the instructions sysvar. It returns the price from the first `ComputeBudget` instruction that `priority_price` decodes. When the fee check is off, the price is `None` and the sysvar is never read.
+
+    ```rust templates/fair-launch/src/processor/execute.rs
+    let mut index = 0;
+    while let Ok(instruction) = load_instruction_at_checked(index, instructions_sysvar) {
+        if instruction.program_id == COMPUTE_BUDGET_PROGRAM {
+            if let Some(price) = priority_price(&instruction.data) {
+                return Ok(Some(price));
+            }
+        }
+        index += 1;
+    }
+    Ok(None)
+    ```
+  </Step>
+  <Step title="Call the rule, then write the counter">
+    The processor fills a `Buy` from the values it gathered. The amount comes from the instruction data. The balance comes from the destination token account, which already holds the bought tokens. The processor passes the `Buy` to `check_buy`. An error from the rule fails the whole swap, and Token-2022 rolls back every balance. The counter is written only after the rule returns `Ok`.
+
+    ```rust templates/fair-launch/src/processor/execute.rs
+    check_buy(
+        &config.params,
+        &Buy {
+            amount: ctx.amount,
+            wallet_balance_after: ctx.destination_view.amount,
+            buys_in_slot: updated.buys,
+            priority_micro_lamports,
+        },
+    )?;
+    
+    updated.encode_into(&mut counter_account.try_borrow_mut_data()?)?;
+    Ok(())
+    ```
+  </Step>
+</Steps>
+
+### A worked example
+
+The unit tests in `rule.rs` use these parameters.
+
+```rust templates/fair-launch/src/rule.rs
+const P: Params = Params {
+    window_start: 100,
+    window_end: 200,
+    max_buy: 50,
+    max_wallet: 120,
+    max_buys_per_slot: 2,
+    max_priority_micro_lamports: 1_000,
+};
+```
+
+A buy of 50 tokens that leaves the buyer with 120, as the second buy in its slot, with a declared price of 1,000 micro-lamports, passes every check. Raising any one value by one unit fails with that check's own error. A buy of 51 fails with `PerBuyCapExceeded`. A balance of 121 fails with `MaxWalletExceeded`. A third buy in the slot fails with `TooManyBuysInSlot`. A price of 1,001 fails with `PriorityFeeTooHigh`. The window is half open, so a buy at time 100 is checked and a buy at time 200 is not.
+
+## Accounts
+
+Each transfer needs two extra accounts, or three when the priority-fee check is on. A swap leg therefore carries 4 or 5 accounts.
+
+| Account | Access | Seeds |
+| --- | --- | --- |
+| Config PDA | Read-only | `["config", mint]` |
+| Slot counter PDA | Writable | `["counter", mint]` |
+| Instructions sysvar | Read-only, only when `max_priority_micro_lamports` is set | None |
+| Hook program | Read-only | None |
+| Validation list | Read-only | `["extra-account-metas", mint]` |
+
+The SDK refuses a leg with a writable extra account unless the integrator names it. Pass the counter to `PrivilegePolicy::allowing_writable`.
+
+`Initialize` takes the venues as the variable accounts after the fixed ones. Each venue must be a token account of the hooked mint, and no venue can repeat.
+
+## Error codes
+
+| Code | Name | When |
+| --- | --- | --- |
+| `0xB001` | `InvalidParams` | The window is empty, or no limit is switched on |
+| `0xB002` | `PoolVaultMismatch` | A venue is not a token account of the hooked mint |
+| `0xB003` | `PerBuyCapExceeded` | The buy is larger than the per-buy cap |
+| `0xB004` | `MaxWalletExceeded` | The buyer's balance after the buy exceeds the per-account cap |
+| `0xB005` | `TooManyBuysInSlot` | The slot has more buys than the launch allows |
+| `0xB006` | `PriorityFeeTooHigh` | The transaction declares a priority fee above the cap |
+| `0xB007` | `InvalidConfig` | The config account is wrong or malformed |
+| `0xB008` | `InvalidInstruction` | An init instruction is malformed |
+| `0xB009` | `InvalidCounter` | The slot counter account is wrong, malformed, or not writable |
+| `0xB00A` | `InvalidSysvar` | The instructions sysvar account is missing or wrong |
+| `0xB00B` | `InvalidVenues` | There is no venue, more than four, or the same venue twice |
+
+## Limits
+
+- `max_wallet` applies per token account, not per person. One person can open many accounts. The slot budget slows this, because all their buys share it.
+- The slot budget applies per mint, not per buyer. When a slot's budget runs out, the hook also refuses honest buyers in that slot.
+- The fee check reads `SetComputeUnitPrice` from the transaction's top-level instructions. It cannot see a tip paid to a block builder as a plain transfer, so it does not stop private bundles.
+- The fee check does not work on v1 transactions. In the v1 format (SIMD-0385) the priority fee is a field of the message and `ComputeBudget` instructions do nothing, so a buyer can bypass the check. Do not rely on it where the cluster accepts v1 transactions.
+- Every transfer of the mint writes the counter, so transfers of the mint in the same block run one after another. Keep the launch window short.
+- A launch has at most four venues. More pools need a different hook or another mint.
+- The per-slot setting has no end unless you set a real `window_end`.
+- The program's upgrade authority can replace this rule. Disclose the authority or revoke it.
+
+## CPMM and CLMM
+
+Fair Launch runs on both Raydium pool types with the same program. Nothing in `rule.rs` or `processor/execute.rs` checks which Raydium program sent the transfer. The hook only compares the source token account with the venues in its config.
+
+| Pool type | Swap instruction | Test in `tests/program-test/tests/local_flows.rs` |
+| --- | --- | --- |
+| CPMM | `swap_base_input_v2` | `cpmm_with_the_fair_launch_template`, `cpmm_with_the_fair_launch_per_slot_setting` |
+| CLMM | `swap_v3` | `clmm_with_the_fair_launch_template`, `clmm_with_the_fair_launch_per_slot_setting` |
+
+A venue is the pool vault that holds the hooked token. A CPMM pool and a CLMM pool each have their own vault. To cover both pools in one launch, name both vaults as venues. The config holds up to four venues (`MAX_VENUES`). Buys from every venue count against the same per-slot budget.
+
+## Run it
+
+Build and test the hook.
+
+```bash
+cargo test -p fair-launch-hook
+cargo build-sbf --manifest-path templates/fair-launch/Cargo.toml --sbf-out-dir target/integration-sbf
+SBF_OUT_DIR=target/integration-sbf cargo test -p fair-launch-hook
+```
+
+Run it through real Raydium pools on a local validator.
+
+```bash
+# Full fair launch setting
+cargo run -p raydium-hook-cli -- e2e --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json --keys target/localnet/keys \
+  --amm all --hook fair-launch
+
+# Anti-bundle setting (per-slot budget only)
+cargo run -p raydium-hook-cli -- e2e --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json --keys target/localnet/keys \
+  --amm all --hook fair-launch-per-slot
+```
+
+Each command builds and deploys the hook, creates a hooked Token-2022 mint, sets up the hook, and creates real CPMM and CLMM pools. For the full setting, the run checks that ordinary swaps pass. It then sends a buy over the cap, three buys in one transaction, and a buy with a high priority fee. The hook must refuse each one with its own error code, and every balance must roll back. Last, the run checks that the oversized buy succeeds after the window closes. For the per-slot setting, the run checks that the hook enforces the slot budget.
+
+The in-process flows `cpmm_with_the_fair_launch_template` and `clmm_with_the_fair_launch_template`, and their `per_slot_setting` versions in `tests/program-test/tests/local_flows.rs`, run the same checks.
+
+Source: [`templates/fair-launch`](https://github.com/trilltino/raydium-transfer-hook/tree/main/templates/fair-launch)
+
+## Related documentation
+
+### Raydium
+
+- [LaunchLab overview](https://docs.raydium.io/products/launchlab/overview). Describes Raydium's token launch program.
+- [CPMM instructions](https://docs.raydium.io/products/cpmm/instructions). Lists the constant product swap instructions.
+- [CLMM instructions](https://docs.raydium.io/products/clmm/instructions). Lists the concentrated liquidity swap instructions.
+- [Routing and MEV](https://docs.raydium.io/integration-guides/routing-and-mev). Explains how bots and routers interact with Raydium swaps.
+
+### Solana
+
+- [MEV protection](https://solana.com/docs/defi/mev-protection). Covers sandwich and front-running risks on Solana.
+- [Compute budget](https://solana.com/docs/core/fees/compute-budget). Explains priority fees, which the hook reads.
+- [Instruction introspection](https://solana.com/docs/core/instructions/instruction-introspection). Shows how a program reads other instructions in its transaction.

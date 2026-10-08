@@ -1,0 +1,53 @@
+---
+title: "Prerequisites for building Raydium transfer hooks"
+sidebarTitle: "Prerequisites"
+description: "What you need installed before you clone the repository. Rust, Solana CLI Agave 4.0, Node.js 22 or later, and optionally Docker for the local validator."
+---
+
+Before you build a hook or run the test suite, install three toolchains. No Solana wallet or devnet SOL is required for local development.
+
+## Rust
+
+The hook programs and the Raydium adapter crates build with the standard Rust toolchain. Install it from [rustup.rs](https://rustup.rs), then verify:
+
+```sh
+rustc --version
+cargo --version
+```
+
+## Solana CLI (Agave 4.0)
+
+You need the Agave 4.0 CLI for `cargo build-sbf` and `solana-test-validator`. Install it from the [Anza documentation](https://docs.anza.xyz/cli/install), then check:
+
+```sh
+solana --version
+```
+
+## Node.js and npm
+
+The TypeScript client and the Fair Launch reference UI require Node 22 or later. Check your version:
+
+```sh
+node --version   # should print v22 or higher
+npm --version
+```
+
+## Docker (optional)
+
+The `cargo xtask localnet validator` command starts a `solana-test-validator` locally. On platforms where the validator has no native build, the task falls back to Docker. You do not need Docker if your host already runs the validator binary.
+
+## No keys needed for localnet
+
+All local commands use throwaway keypairs committed in `tests/fixtures/localnet`. You can clone, build, test, and run the end-to-end flows without creating or funding any wallet.
+
+## Related documentation
+
+### Raydium
+
+- [Toolchain](https://docs.raydium.io/solana-fundamentals/toolchain). Lists the tools Raydium uses to build and test Solana programs.
+
+### Solana
+
+- [Installation](https://solana.com/docs/intro/installation). Installs Rust, the Solana CLI and Anchor.
+- [Installation dependencies](https://solana.com/docs/intro/installation/dependencies). Lists the system packages each platform needs.
+- [Solana CLI basics](https://solana.com/docs/intro/installation/solana-cli-basics). Covers keypairs, cluster selection and airdrops.

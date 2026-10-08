@@ -1,0 +1,55 @@
+---
+title: "Explore the Raydium transfer hook repository layout"
+sidebarTitle: "Repository Layout"
+description: "A table of the top-level directories and crates in the repository, plus the cargo xtask automation commands that build, test, and deploy the hooks."
+---
+
+The repository separates hook programs, shared Rust crates, the TypeScript client, the reference UI, tests, and environment manifests. This page maps each top-level path to what it contains.
+
+## Top-level paths
+
+| Path | What it holds |
+| --- | --- |
+| `crates/transfer-hook-sdk` | Per-leg hook-account resolution with the official SPL resolver, structured errors, instruction framing, and V1 golden fixtures |
+| `crates/raydium-adapters` | Instruction builders for the external Raydium programs |
+| `crates/raydium-hook-driver` | Hook setup providers (including the generic JSON one) and the checked end-to-end flows, over RPC or in-process |
+| `crates/raydium-hook-cli` | The `raydium-hook` command-line tool |
+| `crates/hook-kit` | Shared hook plumbing and an in-process test world |
+| `crates/hook-policy-model` | Platform policy model types that the SDK turns into resolution options |
+| `programs/` | The unrelated `arbitrary-test-hook` and the benchmark hook |
+| `templates/` | The starter (`transfer-hook-starter`) and the three example hooks (`creator-commitment`, `fair-launch`, `holder-rewards`) |
+| `environments/` | Cluster manifests `localnet.json` (keyless), `devnet.json` (integration) and `raydium-devnet.json` (official) |
+| `tests/` | In-process flows, third-party acceptance tests, and the localnet fixtures |
+| `xtask/` | Upstream locks, localnet automation, devnet deployment, and evidence page generation |
+| `packages/transfer-hook-client` | The hook-aware TypeScript client (Apache-2.0). It resolves each leg's hook accounts, builds `swap_base_input_v2` and `swap_v3`, and decodes failures. Tests check it byte for byte against the Rust goldens |
+| `apps/fair-launch-ui` | The Fair Launch reference UI (React and Vite, GPL-3.0-or-later because it uses Raydium SDK V2) and its browser test |
+| `scripts/` | `approve-hooked-mints.ts` approves hooked mints for pool creation or checks them (TypeScript, no Raydium SDK) |
+| `docs/` | Markdown documentation |
+
+## Automation commands
+
+| Command | What it does |
+| --- | --- |
+| `cargo xtask upstream verify` | Checks that the pins in `upstream.lock.toml` exist and that nothing from Raydium is tracked in this repo |
+| `cargo xtask localnet build` | Fetches the locked forks, builds them with the `localnet` feature, and builds every hook |
+| `cargo xtask localnet validator` | Starts a `solana-test-validator` with every program preloaded |
+| `cargo xtask localnet e2e` | Builds, starts the validator, runs every flow, and stops it |
+| `cargo xtask localnet ui-fixture --wallet <PUBKEY> --out <FILE>` | On a running validator, creates a Fair Launch pool and a funded wallet for the UI |
+| `cargo xtask env deploy-devnet` | Builds with the `integration` feature, deploys what is missing, runs the flows, and records the evidence |
+| `cargo xtask devnet-doc` | Regenerates `docs/devnet.md` from `environments/devnet.json` |
+
+## The pinned forks
+
+The repository contains no Raydium source code. The hook-aware changes live in forks pinned by `upstream.lock.toml`. The build fetches them into the git-ignored `target/upstream/` directory when it needs them. `cargo xtask upstream verify` enforces this rule.
+
+## Related documentation
+
+### Raydium
+
+- [Protocol architecture](https://docs.raydium.io/protocol-overview/architecture). Describes how the Raydium programs fit together.
+- [Anchor IDL](https://docs.raydium.io/sdk-api/anchor-idl). Points to the IDL files for the Raydium programs.
+
+### Solana
+
+- [Rust programs](https://solana.com/docs/programs/rust). Explains how to write a Solana program in Rust without Anchor.
+- [Program structure](https://solana.com/docs/programs/rust/program-structure). Shows the entrypoint, instruction and state modules of a Rust program.

@@ -1,0 +1,108 @@
+---
+title: "Swap a Fair Launch token in the browser reference UI"
+sidebarTitle: "Browser Demo"
+description: "Run the Fair Launch reference UI on a local validator. Swap a hooked token on hook-aware CPMM or CLMM pools, simulate before signing, and see the hook allow or refuse trades live in a browser."
+---
+
+The Fair Launch reference UI swaps a hooked token on a hook-aware Raydium pool and shows the hook allow or refuse the trade. It simulates each swap before the wallet signs, and the UI labels itself experimental. It connects only to the local validator and the project's integration devnet, never to official Raydium.
+
+## What it proves
+
+- A browser resolves each swap leg's Transfer Hook accounts with the SPL JavaScript helper.
+- It builds `swap_base_input_v2` or `swap_v3`, simulates the transaction, and only then asks the wallet to sign.
+- A buy inside the launch limits succeeds. The hook refuses an over-limit buy during simulation, the UI shows the reason in words, and nothing is submitted.
+- The UI does not treat a sell as a buy. The Fair Launch rules bind only transfers out of a launch venue.
+
+The UI works for both CPMM and CLMM pools. It picks the adapter from the pool's owner program.
+
+## Install dependencies
+
+```sh
+npm install
+```
+
+## Run on a local validator
+
+<Steps>
+  <Step title="Build the programs">
+    ```sh
+    cargo xtask localnet build
+    ```
+  </Step>
+  <Step title="Start the validator">
+    ```sh
+    cargo xtask localnet validator
+    ```
+
+    Leave this running.
+  </Step>
+  <Step title="Create a fixture">
+    In another terminal, create a Fair Launch pool and fund a wallet:
+
+    ```sh
+    cargo xtask localnet ui-fixture \
+      --wallet <YOUR_WALLET_PUBKEY> \
+      --out target/ui-e2e/fixture.json
+    ```
+
+    Add `--hook creator-commitment` or `--hook holder-rewards` to test a different example. Add `--amm clmm` for a CLMM pool.
+  </Step>
+  <Step title="Start the UI">
+    ```sh
+    npm run ui:dev
+    ```
+
+    Open `http://127.0.0.1:5173/?env=localnet&pool=<POOL_FROM_FIXTURE>` and connect Phantom or Solflare pointed at `http://127.0.0.1:8899`.
+  </Step>
+</Steps>
+
+## Select a different environment
+
+Use `?env=devnet` to connect to the integration devnet deployment instead of localnet:
+
+```text
+http://127.0.0.1:5173/?env=devnet&pool=<POOL_ADDRESS>
+```
+
+There is no official Raydium mode. Raydium's own programs do not contain the hook-aware instructions.
+
+## Tests
+
+Run the client and UI unit tests:
+
+```sh
+npm run ui:test
+```
+
+Run the browser end-to-end tests:
+
+```sh
+npm run ui:e2e
+```
+
+The browser test starts the validator itself if none is running. It covers CPMM and CLMM pools for the Fair Launch hook with one passing buy, one hook-refused buy and one sell. It also covers the Creator Commitment and Holder Rewards panels on a CPMM pool. The suite runs 16 tests against the local validator.
+
+To run against integration devnet:
+
+```sh
+E2E_ENV=devnet npm run ui:e2e
+```
+
+This needs the deployer key in `.keys/` and a fraction of a SOL, because only the admin can create pools.
+
+## License note
+
+The TypeScript client package `packages/transfer-hook-client` is Apache-2.0. The React app `apps/fair-launch-ui` is GPL-3.0-or-later because it uses `@raydium-io/raydium-sdk-v2`, which is GPL-3.0. Do not copy SDK source into this repository's Rust crates.
+
+## Related documentation
+
+### Raydium
+
+- [TypeScript SDK](https://docs.raydium.io/sdk-api/typescript-sdk). Documents Raydium SDK V2, which the demo app uses.
+- [Wallet integration](https://docs.raydium.io/integration-guides/wallet-integration). Shows how a wallet signs and sends Raydium transactions.
+- [Swap](https://docs.raydium.io/user-flows/swap). Walks through a Raydium swap from the user's side.
+
+### Solana
+
+- [Frontend](https://solana.com/docs/frontend). Covers client libraries and wallet connection for web apps.
+- [simulateTransaction](https://solana.com/docs/rpc/http/simulatetransaction). Documents the RPC method that runs a transaction without sending it.

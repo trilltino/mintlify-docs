@@ -1,0 +1,237 @@
+---
+title: "Creator Commitment hook with cliff and linear vesting"
+sidebarTitle: "Creator Commitment"
+description: "Lock a creator's allocation with a cliff and linear vesting schedule. The dedicated account cannot fall below the amount the schedule still locks."
+---
+
+The Creator Commitment hook locks a creator's token allocation with a cliff and linear vesting schedule. The dedicated account cannot fall below the amount the schedule still locks. Every other account trades freely.
+
+## The rule
+
+The rule is about 100 lines of pure Rust with no accounts and no Solana types. The rest of the program is plumbing.
+
+```text
+locked
+  ^
+  |#########                      locked_total
+  |        #  .
+  |        #     .               linear unlock from start to end,
+  |        #        .            nothing before cliff
+  |        #           .
+  +--------+-------------+--> time
+         cliff           end
+```
+
+`processor/execute.rs` calls the rule only when the transfer's source is the creator's account. Token-2022 moves tokens before it calls a hook, so `balance_after` is the balance after the transfer.
+
+```rust
+pub fn check_outgoing(
+    schedule: &Schedule,
+    now: i64,
+    balance_after: u64,
+) -> Result<(), CommitmentError> {
+    if balance_after < schedule.locked_at(now) {
+        return Err(CommitmentError::VestingFloorBreached);
+    }
+    Ok(())
+}
+```
+
+The `Schedule` has four fields in unix seconds and token units: `start`, `cliff`, `end` and `locked_total`. Nothing unlocks before `cliff`. After `cliff`, tokens unlock linearly from `start` to `end`. The locked amount rounds up, so a schedule never unlocks a token early.
+
+## How the rule sits inside the hook
+
+The crate splits into two layers. `rule.rs` holds `Schedule` and `check_outgoing` as pure Rust, so `cargo test` checks the vesting math without a validator. `processor/execute.rs` is the hook. It reads the accounts Token-2022 passes in, picks out the three values the rule needs, and calls the rule. The hook stores no state per transfer, so it writes no account.
+
+### The schedule math
+
+`locked_at` returns the amount still locked at a given time. The rule compares the post-transfer balance with that number.
+
+```rust templates/creator-commitment/src/rule.rs
+pub fn locked_at(&self, now: i64) -> u64 {
+    if now < self.cliff {
+        return self.locked_total;
+    }
+    if now >= self.end {
+        return 0;
+    }
+    let elapsed = (now - self.start) as u128;
+    let duration = (self.end - self.start) as u128;
+    let unlocked = (self.locked_total as u128) * elapsed / duration;
+    self.locked_total - unlocked as u64
+}
+```
+
+The function does the multiplication in `u128`, so `locked_total * elapsed` cannot overflow. Integer division rounds the unlocked amount down. The locked amount is therefore rounded up.
+
+### From a swap to the rule
+
+When a Raydium CPMM or CLMM swap moves the hooked token, Token-2022 moves the tokens first. It then calls the hook program with the SPL `Execute` instruction. `process_instruction` matches the 8-byte `EXECUTE_DISCRIMINATOR` from `hook_kit` and sends the call to `execute::process`, which runs these steps.
+
+<Steps>
+  <Step title="Run the shared checks in hook-kit">
+    `execute_prelude` runs the checks every hook in the repo shares. The hook passes `EXTRA_ACCOUNTS = 1`, so the call must carry exactly 6 accounts.
+
+    - It parses the transfer amount from the instruction data.
+    - It reads the mint's Transfer Hook extension and requires that it names this program.
+    - It reads the source and destination token accounts and requires both to belong to the mint.
+    - It requires the `transferring` flag on both token accounts. Token-2022 sets that flag only during a transfer, so a direct call to the hook fails.
+    - It checks the validation list address, owner and size, then checks the extra account against the list.
+
+    ```rust templates/creator-commitment/src/processor/execute.rs
+    const EXTRA_ACCOUNTS: usize = 1;
+    
+    let ctx = execute_prelude(program_id, accounts, data, EXTRA_ACCOUNTS)?;
+    ```
+  </Step>
+  <Step title="Load the config">
+    The processor requires that this program owns the config account and that its address is the `["config", mint]` PDA. A wrong account fails with `InvalidConfig` (`0xA006`). The decoded config holds the `Schedule` and the address of the creator's token account.
+
+    ```rust templates/creator-commitment/src/processor/execute.rs
+    let config_account = &ctx.extras[0];
+    if config_account.owner != program_id
+        || config_account.key != &config_address(ctx.mint.key, program_id).0
+    {
+        return Err(CommitmentError::InvalidConfig.into());
+    }
+    let config = Config::decode(&config_account.try_borrow_data()?)?;
+    ```
+  </Step>
+  <Step title="Leave early for every other account">
+    The rule covers only tokens that leave the creator's account. When the source is any other account, the hook returns `Ok` and does no more work. Buys, other holders' sells and transfers into the creator's account end here.
+
+    ```rust templates/creator-commitment/src/processor/execute.rs
+    if ctx.source.key != &config.creator_account {
+        return Ok(());
+    }
+    ```
+  </Step>
+  <Step title="Call the rule">
+    The processor reads the cluster time from `Clock` and the source balance from `ctx.source_view`. Token-2022 has already debited the source, so this balance is the balance after the transfer. The processor passes both to `check_outgoing`. An error fails the whole swap with `VestingFloorBreached` (`0xA005`), and Token-2022 rolls back every balance.
+
+    ```rust templates/creator-commitment/src/processor/execute.rs
+    let now = Clock::get()?.unix_timestamp;
+    check_outgoing(&config.schedule, now, ctx.source_view.amount)?;
+    Ok(())
+    ```
+  </Step>
+</Steps>
+
+### A worked example
+
+The unit tests in `rule.rs` use a schedule that locks 1,000 tokens, starts at time 100, has its cliff at 200 and ends at 1,100.
+
+| Time | Locked | Balance after the transfer | Result |
+| --- | --- | --- | --- |
+| 150 | 1,000 | 1,000 | Allowed |
+| 150 | 1,000 | 999 | `VestingFloorBreached` |
+| 200 | 900 | 900 | Allowed |
+| 600 | 500 | 500 | Allowed |
+| 600 | 500 | 499 | `VestingFloorBreached` |
+| 2,000 | 0 | 0 | Allowed |
+
+At time 200 the cliff has passed and 100 of 1,000 seconds have elapsed, so 10% of the tokens unlock at once. From there the locked amount falls by one token per second until the end.
+
+## Accounts
+
+Each transfer needs one extra account, the read-only config PDA with seeds `["config", mint]`. The hook program and the validation list follow it, so a swap leg carries 3 accounts.
+
+`Initialize` takes the creator's token account. It checks that the account belongs to the hooked mint and holds at least `locked_total`.
+
+## Error codes
+
+| Code | Name | When |
+| --- | --- | --- |
+| `0xA001` | `InvalidSchedule` | End is not after start, or cliff is outside the schedule |
+| `0xA002` | `ZeroLockedAmount` | Nothing to lock |
+| `0xA003` | `CreatorAccountMismatch` | The creator account belongs to another mint |
+| `0xA004` | `InsufficientBalanceAtInit` | The account holds less than the amount to lock |
+| `0xA005` | `VestingFloorBreached` | The transfer would leave the account below the locked amount |
+| `0xA006` | `InvalidConfig` | The config account is wrong or malformed |
+| `0xA007` | `InvalidInstruction` | The setup instruction is malformed |
+
+## What the hook stops
+
+The authors tested each attempt against the real Token-2022 program.
+
+| Attempt | Result |
+| --- | --- |
+| Hand the whole account to a new wallet with `SetAuthority` | The floor holds. The new owner can move what is above the floor and no more, and the hook refuses the rest with `0xA005`. The floor belongs to the account. |
+| Approve a delegate for the whole balance and let it transfer | The floor holds. A delegate's transfer goes through the hook, which binds it the same way as the owner. |
+| Burn locked tokens | Not stopped. A burn is not a transfer, so Token-2022 never calls the hook. The burn only hurts the creator. The balance is then below the floor, so nothing can leave until the schedule unlocks, and nobody else gains. |
+| Put the allocation in a different account | Not covered. The commitment binds one dedicated account. `Initialize` refuses an account that holds less than `locked_total`, but the hook cannot prove the creator holds no other tokens. |
+| A mint with a permanent delegate | Not tested. Token-2022 calls the hook for a permanent delegate's transfer, so the floor should apply. The test world does not build such a mint. |
+
+## Limits
+
+- The floor belongs to the token account, not the person. Moving the account to another wallet does not release locked tokens.
+- A hook cannot see a burn. A creator can burn locked tokens, which only hurts the creator.
+- The hook supports one creator account per mint. A team with several wallets needs one commitment per account, or a different hook.
+- The hook reads cluster time from `Clock::unix_timestamp`, which can drift a few seconds from wall-clock time.
+- Locked tokens still count as supply. Nothing escrows them. They sit in the creator's account, where anyone can see them.
+- The program's upgrade authority can replace this rule. Disclose the authority or revoke it.
+
+## CPMM and CLMM
+
+Creator Commitment runs on both Raydium pool types with the same program. Nothing in `rule.rs` or `processor/execute.rs` checks which Raydium program sent the transfer. The hook reads the creator's balance and the lock schedule, so a sale into a CPMM pool and a sale into a CLMM pool meet the same limit.
+
+| Pool type | Swap instruction | Test in `tests/program-test/tests/local_flows.rs` |
+| --- | --- | --- |
+| CPMM | `swap_base_input_v2` | `cpmm_with_the_creator_commitment_template` |
+| CLMM | `swap_v3` | `clmm_with_the_creator_commitment_template` |
+
+The hook checks one thing: the creator's account balance after tokens leave it. Token-2022 moves the tokens before it calls the hook. The hook then compares the remaining balance with `locked_at(now)`. The receiving account does not matter, so a CPMM vault and a CLMM vault get the same treatment.
+
+These are the ways the creator's tokens can reach each pool type. The hook runs on each one.
+
+| Creator action | CPMM instruction | CLMM instruction |
+| --- | --- | --- |
+| Sell the token | `swap_base_input_v2` | `swap_v3` |
+| Add liquidity | `deposit_v2` | `open_position_v3`, `increase_liquidity_v3` |
+| Open a limit order that sells the token | none | `open_limit_order_v2`, `increase_limit_order_v2` |
+
+A deposit or a limit order moves tokens out of the creator's account in the same way a sale does. If the balance left behind is below the locked amount, the hook returns `VestingFloorBreached` (`0xA005`) and the whole transaction rolls back. Tokens that come back to the creator, such as withdrawn liquidity, pass without a check. The creator can always receive tokens.
+
+The original CPMM `deposit` instruction rejects hooked mints. Only `deposit_v2` accepts them.
+
+## Run it
+
+Build and test the hook.
+
+```bash
+cargo test -p creator-commitment-hook
+cargo build-sbf --manifest-path templates/creator-commitment/Cargo.toml --sbf-out-dir target/integration-sbf
+SBF_OUT_DIR=target/integration-sbf cargo test -p creator-commitment-hook
+```
+
+Run it through real Raydium pools on a local validator.
+
+```bash
+cargo run -p raydium-hook-cli -- e2e --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json --keys target/localnet/keys \
+  --amm all --hook creator-commitment
+```
+
+The run checks that normal swaps pass. It then sends a sale that would breach the floor, and the hook must refuse it with `0xA005` and roll it back. Last, the run checks that the same sale succeeds once the schedule has ended.
+
+The in-process flows `cpmm_with_the_creator_commitment_template` and `clmm_with_the_creator_commitment_template` in `tests/program-test/tests/local_flows.rs` run the same checks.
+
+## Disclosure
+
+The commitment is on chain. The config PDA `["config", mint]` stores the schedule and names the locked account. Anyone can compare that account's balance with the schedule. The hook cannot prove that this account holds the creator's whole allocation. To prove that, publish how the supply was distributed at launch.
+
+Source: [`templates/creator-commitment`](https://github.com/trilltino/raydium-transfer-hook/tree/main/templates/creator-commitment)
+
+## Related documentation
+
+### Raydium
+
+- [LaunchLab vesting](https://docs.raydium.io/products/launchlab/vesting). Describes Raydium's own vesting for launched tokens.
+- [Add and remove liquidity](https://docs.raydium.io/user-flows/add-remove-liquidity). Walks through deposits into CPMM and CLMM pools.
+- [CPMM instructions](https://docs.raydium.io/products/cpmm/instructions). Lists the deposit and swap instructions.
+- [CLMM instructions](https://docs.raydium.io/products/clmm/instructions). Lists the position, liquidity and swap instructions.
+
+### Solana
+
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Explains how Token-2022 calls the hook on every transfer.
+- [Transfer tokens](https://solana.com/docs/tokens/basics/transfer-tokens). Shows the token transfer that the hook checks.

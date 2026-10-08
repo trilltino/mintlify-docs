@@ -1,0 +1,76 @@
+---
+title: "How a hooked Raydium swap resolves and orders its accounts"
+sidebarTitle: "How It Works"
+description: "Follow a hooked swap from the integrator to the hook program, with the N+2 accounts per transfer, how the SDK resolves each transfer, and how it builds the swap."
+---
+
+A hooked Raydium swap passes through five layers. The integrator calls the transfer hook SDK, the SDK builds the instruction for the hook-aware Raydium program, Raydium calls Token-2022, and Token-2022 calls the hook. This page explains how the SDK resolves and orders the hook accounts for each transfer.
+
+```text
+integrator (CLI, app, script)
+        |
+        v
+raydium-hook-driver / transfer-hook-sdk     resolve each transfer's hook accounts, build the swap
+        |
+        v
+Raydium program (hook-aware build)          swap_base_input_v2 / swap_v3, forwards each slice
+        |
+        v
+Token-2022 transfer CPI
+        |
+        v
+any Transfer Hook program                   one of the examples, or yours
+```
+
+## One transfer, one slice
+
+A hooked transfer needs the hook program, its validation list, and N extra accounts that the hook author chooses. Each transfer therefore carries N + 2 accounts, called a slice. A swap has two transfers, so it has two slices.
+
+The SDK resolves the two slices independently and appends them input first, then output. It never merges, deduplicates, or reorders them, because Raydium and Token-2022 read each slice by position. Solana may deduplicate identical keys when it compiles the transaction message. That does not affect the slice boundaries in the instruction data.
+
+## How the SDK resolves a transfer
+
+The function `transfer_hook_sdk::resolve_leg` resolves one transfer against current chain state. It uses the official `spl-transfer-hook-interface` helper and does not reimplement the account list format.
+
+<Steps>
+  <Step title="Read the mint">
+    The mint must be owned by Token-2022. If it has no TransferHook extension or no hook program, the transfer has no slice.
+  </Step>
+  <Step title="Check the hook program">
+    The program must exist, be executable, and be owned by an allowed loader. It cannot be Token-2022 or a Raydium program. `ResolveOptions` can pin the exact program and the required extension authority.
+  </Step>
+  <Step title="Fetch the validation list">
+    The SDK derives the canonical validation address and fetches it. The hook program must own it, and it must parse as an `ExtraAccountMetaList` for `Execute`.
+  </Step>
+  <Step title="Resolve the extra accounts">
+    The SDK resolves the list for this transfer's exact source, mint, destination, authority, and amount.
+  </Step>
+  <Step title="Check privileges">
+    The SDK refuses a resolved account that is a signer or writable unless the integrator named it. The hook program and validation list must be read-only and not signers.
+  </Step>
+  <Step title="Return the slice">
+    The SDK returns a `LegHook` that holds the resolved extra accounts, the hook program, and the validation list, in that order. It also holds a fingerprint of the mint, program, and list.
+  </Step>
+</Steps>
+
+The SDK caches nothing. Call `LegHook::verify_unchanged` to re-read the three accounts and confirm nothing changed between resolving and signing. Errors name the transfer that failed, its mint, and the cause.
+
+`resolve_legs` resolves both transfers on a private scratch instruction. If the second transfer fails, your instruction stays untouched.
+
+## How the SDK builds the swap
+
+The builders `frame_cpmm_swap_base_input_v2` and `frame_clmm_swap_v3` take resolved `LegHook` values, never raw account lists. They re-derive each validation address and reject trailing accounts and privilege conflicts. The `*_or_passthrough` versions return the original V1 instruction, byte for byte, when neither transfer has a hook.
+
+## Related documentation
+
+### Raydium
+
+- [CPMM instructions](https://docs.raydium.io/products/cpmm/instructions). Lists the instructions of the constant product program.
+- [CLMM instructions](https://docs.raydium.io/products/clmm/instructions). Lists the instructions of the concentrated liquidity program.
+- [TypeScript SDK](https://docs.raydium.io/sdk-api/typescript-sdk). Documents Raydium SDK V2, which builds the unhooked part of a swap.
+
+### Solana
+
+- [Transfer hook integration](https://solana.com/docs/tokens/extensions/transfer-hook-integration). Shows how a caller resolves and appends the hook accounts.
+- [Program derived addresses](https://solana.com/docs/core/pda). Explains how the validation account address comes from seeds.
+- [Versioned transactions](https://solana.com/docs/core/transactions/versioned-transactions). Explains address lookup tables for transactions with many accounts.

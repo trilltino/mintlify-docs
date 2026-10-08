@@ -1,0 +1,111 @@
+---
+title: "Contribute changes to the Raydium transfer hook repository"
+sidebarTitle: "Contributing"
+description: "Contribute to Raydium Transfer Hook with evidence-based changes, focused tests, exact error codes, and the CI checks expected of every pull request."
+---
+
+Every change to Raydium Transfer Hook must be small, backed by evidence and reproducible. This page lists the contribution rules, the checks you run before pushing, and what CI runs from a clean checkout.
+
+## What a change must prove
+
+1. Identify the exact upstream Raydium instruction and transfer helper involved. Raydium source never goes into this repository. Changes to it go to the external forks. You pin the new commit in `upstream.lock.toml` and record it in `docs/source-lock.md`.
+2. Check Token-2022 and Transfer Hook Interface behavior against their current source.
+3. Keep existing V1 behavior, discriminators and fixed account layouts.
+4. Add a focused test for hooked and non-hooked transfers, including missing and stale extra accounts. A hook rule change needs a test that asserts the exact error code.
+5. Record support only in `docs/transfer-surface-matrix.md`, with the strongest evidence you have. The levels are unit-tested, verified in-process at runtime, and verified on devnet.
+
+## What never to commit
+
+Do not commit keypairs, RPC credentials or mainnet transaction artifacts. Git ignores `.keys/` and `reference/`. The only tracked keys are the throwaway localnet keys in `tests/fixtures/localnet`. Never fund them on a public cluster.
+
+Do not claim an integration works from a model alone. The `hook-policy-model` crate asserts design facts only. It is not runtime evidence.
+
+Do not change the pinned dependency versions.
+
+| Crate | Version |
+| --- | --- |
+| `solana-program` | `2.2.1` |
+| `solana-program-test` | `2.2.7` |
+| `solana-sdk` | `2.2.2` |
+| `spl-token` | `7.0.0` |
+| `spl-token-2022` | `7.0.0` |
+| `spl-transfer-hook-interface` | `0.10.0` |
+| `spl-tlv-account-resolution` | `0.10.0` |
+
+Do not change per-leg resolution. The two transfers of a swap get separate slices. The SDK never merges, deduplicates or reorders them.
+
+## Local checks to run
+
+Before pushing, run these commands in order:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo xtask upstream verify
+```
+
+When you touch a hook program, the framers or the flows, also run the runtime tests:
+
+```bash
+cargo xtask localnet build
+cargo test -p program-test-flows -p third-party-hook-acceptance -- --ignored
+cargo xtask localnet e2e --skip-build
+```
+
+The ignored tests fail with an error when a required SBF artifact is missing. They do not pass in silence.
+
+## What CI runs
+
+`.github/workflows/ci.yml` defines CI. It runs three jobs on every push and pull request, from a clean checkout with no secrets and no public cluster.
+
+### Check job
+
+- `cargo fmt --all -- --check`, and `cargo fmt -- --check` inside `templates/transfer-hook-starter`
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`
+- `cargo test --locked --workspace`
+- `cargo test --locked --manifest-path templates/transfer-hook-starter/Cargo.toml`
+- `cargo xtask upstream verify`
+- `git diff --exit-code && test -z "$(git status --porcelain)"`, which confirms that git tracks nothing fetched or generated
+
+### Frontend job
+
+- `npm ci`, `npm run typecheck` and `npm run ui:test`
+- `npm --workspace apps/fair-launch-ui run build`
+- A `git status --porcelain` check
+
+### Runtime job
+
+- Installs the Agave v4.0.0 Solana toolchain
+- Runs `cargo xtask localnet build`, which builds the hook-support forks with `localnet` and every hook
+- Runs `cargo test -p program-test-flows -p third-party-hook-acceptance -- --ignored` with `RTH_PROFILE=localnet` and `SBF_OUT_DIR` set to the built artifacts
+- Runs a smoke test of the benchmark hook
+- Runs `cargo xtask localnet e2e --skip-build`
+- Runs the browser end-to-end test with Playwright on Chromium, against the Fair Launch UI and the local validator
+- Runs a `git status --porcelain` check
+
+## Recording evidence
+
+When you extend the set of supported transfer paths, record the status in `docs/transfer-surface-matrix.md` with the strongest evidence you have. The statuses, from weakest to strongest, are:
+
+1. `unsupported`
+2. `designed`
+3. `implemented (external branch)`
+4. `in-process verified`
+5. `local validator verified`
+6. `devnet verified`
+7. `official Raydium deployed`
+
+No row is `official Raydium deployed` today. Every claim must point to a test file, a CI run or a devnet transaction.
+
+## Related documentation
+
+### Raydium
+
+- [Security](https://docs.raydium.io/security). Collects Raydium's audits and security model.
+- [Disclosure](https://docs.raydium.io/security/disclosure). Explains how to report a vulnerability to Raydium.
+
+### Solana
+
+- [Verified builds](https://solana.com/docs/programs/verified-builds). Shows how to tie deployed bytecode to a public commit.
+- [Transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Defines the interface every contributed hook implements.

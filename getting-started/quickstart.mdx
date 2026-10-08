@@ -1,0 +1,79 @@
+---
+title: "Quickstart with Raydium transfer hooks"
+sidebarTitle: "Quickstart"
+description: "Clone the repo, build the pinned Raydium forks and every hook, start a local validator, and run the full end-to-end test suite against CPMM and CLMM pools."
+---
+
+This page shows the fastest path from a clean checkout to a passing end-to-end run on a local validator. You need Rust, the Solana CLI (Agave 4.0), and Node.js installed.
+
+## Clone the repository
+
+```sh
+git clone <your-fork-or-upstream-url>
+cd raydium-transfer-hook
+```
+
+## Build everything
+
+```sh
+cargo xtask localnet build
+```
+
+This fetches the pinned Raydium forks into `target/upstream/`, builds them with their `localnet` feature, and compiles every hook program. It is the slowest step but runs once.
+
+## Start the validator
+
+```sh
+cargo xtask localnet validator
+```
+
+Leave this running in its own terminal. It preloads every built program so the tests do not need to deploy anything.
+
+## Run the end-to-end tests
+
+In another terminal:
+
+```sh
+cargo xtask localnet e2e
+```
+
+This command:
+
+1. Builds every hook.
+2. Deploys each one to the running validator.
+3. Creates a hooked Token-2022 mint and a plain quote mint.
+4. Sets the hook up from its `setup.json`.
+5. Creates real CPMM and CLMM pools.
+6. Swaps in both directions through both AMMs.
+7. Makes the hook refuse, then checks that every balance rolls back.
+8. Prints a PASS/FAIL table.
+
+## Run a single hook
+
+To run one hook instead of every shipped one, call the CLI directly:
+
+```sh
+cargo run -p raydium-hook-cli -- e2e \
+  --env environments/localnet.json \
+  --keypair tests/fixtures/localnet/admin.json \
+  --keys target/localnet/keys \
+  --amm all --hook-dir my-hook
+```
+
+Replace `my-hook` with the path to your hook directory.
+
+## What you should see
+
+The end-to-end table lists each hook and each AMM. For each row it shows whether the swap with the hooked token as input passed, whether the swap with the hooked token as output passed, whether every expected refusal rolled back, and how many follow-up steps passed. A red row means a check failed and the command exited with an error.
+
+## Related documentation
+
+### Raydium
+
+- [Quick start](https://docs.raydium.io/quick-start). Lists Raydium's first steps for pools and swaps.
+- [Swap from the CLI](https://docs.raydium.io/quick-start/swap-from-cli). Sends a Raydium swap from the command line.
+
+### Solana
+
+- [Quick start](https://solana.com/docs/intro/quick-start). Introduces accounts, transactions and programs.
+- [Clusters and RPC endpoints](https://solana.com/docs/references/clusters). Lists localnet, devnet, testnet and mainnet endpoints.

@@ -1,0 +1,125 @@
+---
+title: "Run hooked Raydium swaps on Solana devnet"
+sidebarTitle: "Run on Devnet"
+description: "Test hooks on Solana devnet using your own keys and an environment manifest. Deploy hook-aware Raydium forks, approve mints, and record real cluster evidence."
+---
+
+The quickstart runs on a local validator with no keys. To prove a hook on a real cluster, use a devnet environment file and your own keypair. You deploy the hook-aware Raydium forks under program IDs you control, run the same end-to-end flows, and record evidence.
+
+## The two devnet manifests
+
+| Manifest | Programs | Purpose |
+| --- | --- | --- |
+| `environments/devnet.json` | The project's hook-aware builds under its own program IDs | The recorded integration devnet evidence page |
+| `environments/raydium-devnet.json` | Raydium's official devnet programs | Compatibility probes only, because these programs reject hook-aware instructions |
+
+To check whether a cluster's Raydium programs support hooks:
+
+```sh
+cargo run -p raydium-hook-cli -- env probe --env environments/raydium-devnet.json
+```
+
+Official Raydium devnet returns `unsupported` because `swap_base_input_v2` and `swap_v3` are not present.
+
+## What you need
+
+- A Solana devnet keypair with enough SOL for rent. All programs need about 13 SOL. Your hook alone needs much less.
+- These keys in `.keys/`, which git ignores. Never commit them.
+  - `deployer.json` pays and is the admin
+  - `cpmm-program.json` and `clmm-program.json` hold the program IDs
+  - `cpmm-fee-receiver.json` is the wrapped-SOL token account
+  - `hook-program.json` is your hook
+
+## Fork the Raydium forks and set your IDs
+
+1. Fork `trilltino/raydium-cp-swap` and `trilltino/raydium-clmm` on the `transfer-hook-support` branch.
+2. Set your own program ID, admin and fee receiver in each `integration` feature.
+3. Update `upstream.lock.toml` to your commits, then verify:
+   ```sh
+   cargo xtask upstream verify
+   ```
+
+## Create your environment
+
+Copy `environments/devnet.json` to `environments/mine.json`. Replace `programs`, `admin` and `cpmm_fee_receiver` with your addresses. Empty `deployments` and `evidence`.
+
+## Build, deploy, run and record
+
+One command does all of it:
+
+```sh
+cargo xtask env deploy-devnet --env environments/mine.json
+```
+
+It verifies the locks, builds the forks and every hook, and deploys what is missing. It then runs `raydium-hook e2e --record` for every hook through both AMMs and regenerates the evidence page.
+
+To run a subset:
+
+```sh
+cargo xtask env deploy-devnet --env environments/mine.json --hook fair-launch --amm cpmm
+```
+
+## Approve a hooked mint
+
+Raydium's existing `create_support_mint_associated` rule requires the program admin to approve a Token-2022 mint with a TransferHook extension before a pool can use it. Only the admin key can sign this approval.
+
+Check whether a mint is approved:
+
+```sh
+cargo run -p raydium-hook-cli -- mint approval --env environments/mine.json --mint MINT
+```
+
+Approve one mint or many:
+
+```sh
+cargo run -p raydium-hook-cli -- mint approve \
+  --env environments/mine.json \
+  --keypair .keys/deployer.json \
+  --mint MINT
+
+cargo run -p raydium-hook-cli -- mint approve \
+  --env environments/mine.json \
+  --keypair .keys/deployer.json \
+  --mints-file mints.txt
+```
+
+Add `--dry-run` to preview without sending. The command simulates every transaction, skips mints that are already approved, and reports failures without stopping the rest.
+
+## Program IDs in the committed devnet manifest
+
+The project's integration devnet deploys these IDs in `environments/devnet.json`:
+
+| Program | ID |
+| --- | --- |
+| CPMM | `7tRJH4mmEfNGGLf9E8qEvo3oSjq2b75DhSggb1Wz45fJ` |
+| CLMM | `3dNJapViueBArDN3HbWKcEf2u6hfZQ3oDyh3GmUXJ8oD` |
+| reference-hook | `Cz3Ge1ENd1yZAbtXA88dYaxA8x4ZkSxxdHmSj7nxQ11X` |
+| arbitrary-test-hook | `EtXNoNoYQdF9QFaSttjGzZkAk29EcBW9apdcE4En6WLB` |
+| creator-commitment | `EMN2CsndkRBFzf5qjQFzSRnbM8JJmWDowmisDdMNNBK6` |
+| fair-launch | `7xyk1AQg7xCaQucPgWs13hmAs4dmD214raNgEZhLPQSu` |
+| holder-rewards | `Dn34iBwWW3vSheCafjqfP568hwvS1tGgDiqsUeHrTyL` |
+
+The admin and upgrade authority is `QHgnAZswA5wt8ABUv5n7yM4FXFJdNwLsNYXKSVKB1Pm`.
+
+## Regenerate the evidence page
+
+After a run, update the markdown record:
+
+```sh
+cargo xtask devnet-doc --env environments/mine.json --out docs/devnet.md
+```
+
+This command reads the environment manifest and writes `docs/devnet.md` with the program table, deployment hashes, transaction signatures and the full evidence table. A fork does not need the committed `docs/devnet.md`. Its own copy is useful for audit and review.
+
+## Related documentation
+
+### Raydium
+
+- [Create a CPMM pool](https://docs.raydium.io/user-flows/create-cpmm-pool). Walks through the steps and costs of a new constant product pool.
+- [Create a CLMM pool](https://docs.raydium.io/user-flows/create-clmm-pool). Walks through the steps and costs of a new concentrated liquidity pool.
+
+### Solana
+
+- [Clusters and RPC endpoints](https://solana.com/docs/references/clusters). Lists the devnet endpoint and its limits.
+- [Solana CLI reference](https://solana.com/docs/references/solana-cli). Documents the `solana` commands for keys, balances and programs.
+- [Deploying programs](https://solana.com/docs/programs/deploying). Covers program deployment and upgrade authority.

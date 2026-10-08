@@ -1,0 +1,107 @@
+---
+title: "Fork the transfer hook starter template"
+sidebarTitle: "Fork the Starter"
+description: "Copy the transfer-hook-starter template and understand what plumbing is already done, which files you edit, and which you leave alone."
+---
+
+Every hook in this repository follows the same shape. The fastest way to start is to copy `templates/transfer-hook-starter` and change one file, `src/rule.rs`. The rest is shared plumbing that you can leave alone.
+
+<Steps>
+  <Step title="Copy the starter">
+    From the repository root:
+
+    ```sh
+    cp -r templates/transfer-hook-starter my-hook
+    ```
+
+    On Windows:
+
+    ```powershell
+    Copy-Item -Recurse templates\transfer-hook-starter my-hook
+    ```
+  </Step>
+  <Step title="Rename the crate">
+    Open `my-hook/Cargo.toml` and change the `name` field from `transfer-hook-starter` to your crate name. The crate has an empty `[workspace]` table, so it still builds after you copy it out of the repository.
+
+    ```toml
+    [package]
+    name = "my-hook"
+    ```
+  </Step>
+  <Step title="Edit the rule">
+    Open `my-hook/src/rule.rs`. Change `validate_params` to set what a creator may configure. Change `check_transfer` to allow or refuse each transfer. See [Write your rule](/build-a-hook/write-your-rule).
+  </Step>
+  <Step title="Update tests and setup.json">
+    The tests expect the default max-transfer rule. Update the ones that exercise the rule. Keep the plumbing tests for direct-call rejection, authority and config layout. Update `setup.json` if you change the rule's parameters or error codes. See [Test your hook](/build-a-hook/test-your-hook).
+  </Step>
+</Steps>
+
+## What the starter already handles
+
+| Already done | What it is |
+| --- | --- |
+| SPL `Execute` entrypoint | Token-2022 calls this on every transfer. The starter implements it and checks the `transferring` flag on both token accounts, so it refuses a direct call. |
+| Canonical validation list (`ExtraAccountMetaList`) | One `InitializeHook` instruction creates it together with the per-mint config. |
+| Per-mint config account | Seeds `["hook-config", mint]`, versioned, with authority modes for extension authority, mint authority, explicit and immutable. Supports `UpdateConfig` and `SetConfigAuthority`. |
+| Typed error codes | `HookError` starts at `0x7001`, so integrators can tell your hook caused a refusal. |
+| Tests against real Token-2022 | Runtime tests run through the real Token-2022 processor. |
+
+## Which files to change
+
+```text
+my-hook/
+  Cargo.toml            CHANGE: rename the crate
+  setup.json            CHANGE: update if you change params or error codes
+  src/
+    rule.rs             CHANGE: your custom logic
+    config.rs           LEAVE ALONE (or extend if your rule needs new fields)
+    instruction.rs      LEAVE ALONE (or extend if you add new instructions)
+    error.rs            CHANGE: add new error codes in your own range
+    pda.rs              LEAVE ALONE (or extend if you add new PDAs)
+    authority.rs        LEAVE ALONE
+    constants.rs        LEAVE ALONE (or extend if you add new templates)
+    processor/          LEAVE ALONE (or extend if you add new instructions)
+      mod.rs            LEAVE ALONE
+      common.rs         LEAVE ALONE
+      execute.rs        LEAVE ALONE (calls your rule.rs)
+      initialize.rs     LEAVE ALONE
+      mutate.rs         LEAVE ALONE
+  tests/
+    hook_program.rs     CHANGE: update rule-specific tests
+    token_2022_transfer.rs  LEAVE ALONE (plumbing test)
+    setup_json.rs       CHANGE: if setup.json changes
+```
+
+## Start from an example instead
+
+The three examples share the same shape and contain more code you can copy.
+
+| Example | What it adds |
+| --- | --- |
+| `fair-launch` | Per-slot counter, buy detection, priority-fee reading, optional extra accounts |
+| `creator-commitment` | Vesting floor on one account |
+| `holder-rewards` | Per-holder record, global state, one-time funding mode |
+
+You can copy any example instead of the starter and edit its `src/rule.rs` the same way.
+
+## What you do not need to write
+
+You do not write account resolution, Raydium instruction framing or Token-2022 plumbing. The SDK and driver handle those. The starter is optional. A hook that shares no code with it works the same way, and `programs/arbitrary-test-hook` proves this.
+
+## Next steps
+
+- [Write your rule](/build-a-hook/write-your-rule)
+- [Configure accounts](/build-a-hook/configure-accounts)
+- [Test your hook](/build-a-hook/test-your-hook)
+
+## Related documentation
+
+### Raydium
+
+- [Programs and Anchor](https://docs.raydium.io/solana-fundamentals/programs-and-anchor). Explains how Raydium programs are built.
+- [Rust CPI](https://docs.raydium.io/sdk-api/rust-cpi). Shows how another Rust program calls Raydium.
+
+### Solana
+
+- [Rust programs](https://solana.com/docs/programs/rust). Explains native Rust programs, which the starter uses.
+- [Program structure](https://solana.com/docs/programs/rust/program-structure). Shows how a Rust program splits its entrypoint, processor and state.
