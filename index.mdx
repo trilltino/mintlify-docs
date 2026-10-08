@@ -1,0 +1,44 @@
+---
+title: "Raydium Transfer Hook Kit: build hooked tokens for Raydium"
+sidebarTitle: "Home"
+description: "Write a Token-2022 transfer hook, run it inside Raydium CPMM and CLMM swaps, and test it on a local validator and on devnet with the Raydium Transfer Hook Kit."
+---
+
+The Raydium Transfer Hook Kit runs a Token-2022 transfer hook inside Raydium CPMM and CLMM swaps. You write one rule in `rule.rs`. The kit resolves the hook accounts for each transfer, builds the swap, and checks that a refused transfer rolls back every balance. The source lives in [trilltino/raydium-transfer-hook](https://github.com/trilltino/raydium-transfer-hook).
+
+<CardGroup cols={2}>
+  <Card title="Overview" icon="book-open" href="/introduction/transfer-hooks-on-raydium">
+    What the kit does and which Raydium instructions it supports today.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/getting-started/quickstart">
+    Build the forks and every hook, then run the end-to-end tests on a local validator.
+  </Card>
+  <Card title="Build a hook" icon="hammer" href="/build-a-hook/fork-the-starter">
+    Fork the starter, write your rule, configure accounts, test and deploy.
+  </Card>
+  <Card title="Examples" icon="layer-group" href="/examples/fair-launch">
+    Fair Launch, Creator Commitment and Holder Rewards, each tested on CPMM and CLMM.
+  </Card>
+</CardGroup>
+
+## Start here
+
+<Steps>
+  <Step title="Install the tools">
+    Install Rust, the Solana CLI and the other tools listed in [Prerequisites](/getting-started/prerequisites).
+  </Step>
+  <Step title="Run the quickstart">
+    Clone the repository and run every hook against CPMM and CLMM pools on a local validator with the [Quickstart](/getting-started/quickstart).
+  </Step>
+  <Step title="Write your own rule">
+    Copy the starter template and change `rule.rs`, as shown in [Write your rule](/build-a-hook/write-your-rule).
+  </Step>
+  <Step title="Deploy to devnet">
+    Deploy your hook and record the evidence with [Run on devnet](/getting-started/devnet).
+  </Step>
+</Steps>
+
+## Related documentation
+
+- [Raydium docs](https://docs.raydium.io/). Covers the CPMM and CLMM programs that the hook-aware forks are based on.
+- [Solana transfer hook](https://solana.com/docs/tokens/extensions/transfer-hook). Defines the Token-2022 extension that every hook implements.
